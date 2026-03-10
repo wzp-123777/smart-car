@@ -6,17 +6,16 @@
 #include "motor.h"
 
 /**
- * @brief  电机方向引脚GPIO初始化
- * @note   如果已在CubeMX中配置GPIO，可跳过此函数
+ * @brief  电机方向引脚 + STBY使能引脚 GPIO初始化
  */
 void Motor_GPIO_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* 使能GPIOC时钟 */
+    /* 使能GPIOC时钟（方向引脚） */
     __HAL_RCC_GPIOC_CLK_ENABLE();
 
-    /* 配置 PC0~PC7 为推挽输出 */
+    /* 配置 PC0~PC7 为推挽输出（电机方向） */
     GPIO_InitStruct.Pin   = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3
                           | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
     GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
@@ -28,6 +27,32 @@ void Motor_GPIO_Init(void)
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3
                             | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7,
                       GPIO_PIN_RESET);
+
+    /* 使能GPIOD时钟（STBY引脚） */
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+
+    /* 配置 PD0 为推挽输出（TB6612 STBY使能） */
+    GPIO_InitStruct.Pin   = MOTOR_STBY_PIN;
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull  = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(MOTOR_STBY_PORT, &GPIO_InitStruct);
+
+    /* 拉高STBY → 使能所有TB6612驱动板 */
+    HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_SET);
+}
+
+/**
+ * @brief  使能/禁用电机驱动板
+ * @note   STBY=HIGH → 驱动正常工作
+ *         STBY=LOW  → 驱动板关断，电机自由停转（硬件级急停）
+ */
+void Motor_Enable(uint8_t enable)
+{
+    if (enable)
+        HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_SET);
+    else
+        HAL_GPIO_WritePin(MOTOR_STBY_PORT, MOTOR_STBY_PIN, GPIO_PIN_RESET);
 }
 
 /**
