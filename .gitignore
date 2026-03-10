@@ -1,0 +1,26 @@
+# Keil 编译产物
+*.o
+*.d
+*.lst
+*.htm
+*.map
+*.axf
+*.hex
+*.bin
+*.elf
+*.lnp
+*.bak
+*.dep
+*.uvguix.*
+*.scvd
+*.dbgconf
+
+# Keil 工程临时文件
+Objects/
+Listings/
+DebugConfig/
+RTE/
+
+# 系统文件
+Thumbs.db
+.DS_Store
