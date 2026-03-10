@@ -34,6 +34,7 @@
 #include "syn6658.h"
 #include "mpu6050.h"
 #include "state_machine.h"
+#include "alert.h"
 #include <stdio.h>
 
 /* ================================================================
@@ -531,6 +532,7 @@ int main(void)
     MX_USART2_Init();           /* SYN6658串口 */
     MX_I2C1_Init();             /* MPU6050 I2C */
     IR_Init();                  /* 红外传感器 */
+    Alert_Init();               /* LED + 蜂鸣器 */
     StartButton_Init();         /* 启动按键 */
 
     /* ---------- 模块初始化 ---------- */
@@ -563,6 +565,7 @@ int main(void)
     SM_Init(&g_state_machine, 5);  /* 假设5个巡检点，根据赛题修改 */
 
     /* ---------- 启动语音提示 ---------- */
+    Alert_Beep();               /* 滴一声表示上电成功 */
     SYN6658_Speak(&huart2, "系统就绪，请按启动键");
 
     /* ---------- 启动10ms定时器 ---------- */

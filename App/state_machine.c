@@ -12,6 +12,7 @@
 #include "openmv.h"
 #include "syn6658.h"
 #include "mpu6050.h"
+#include "alert.h"
 
 /* ==================== 外部变量（在main.c中定义） ==================== */
 extern TIM_HandleTypeDef htim1;     /* PWM定时器 */
@@ -128,6 +129,9 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
         /* 等待500ms稳定后进入视觉识别 */
         if (SM_IsTimeout(sm))
         {
+            /* 声光提示：亮灯+鸣笛 500ms */
+            Alert_Checkpoint(500);
+
             /* 发送识别指令给OpenMV */
             OpenMV_SendCmd(&huart1, OPENMV_CMD_DETECT);
             SM_TransitionTo(sm, STATE_VISION_DETECT);
@@ -215,13 +219,16 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
     /* ==================== 任务完成 ==================== */
     case STATE_FINISHED:
         Motor_Stop(&htim1);
-        /* 可以加LED指示或蜂鸣器提示 */
+        /* 完成提示：三声短促蜂鸣 + LED闪烁 */
+        Alert_Error(3);
+        Alert_LED_On();  /* 常亮表示已完成 */
         break;
 
     /* ==================== 错误状态 ==================== */
     case STATE_ERROR:
         Motor_Stop(&htim1);
-        /* 错误处理：闪烁LED等 */
+        /* 错误报警：快速闪烁5次 */
+        Alert_Error(5);
         break;
 
     default:
