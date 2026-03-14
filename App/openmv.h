@@ -11,7 +11,7 @@
 #ifndef __OPENMV_H
 #define __OPENMV_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 #include <string.h>
 
 /* ==================== 通信协议定义 ==================== */
@@ -57,16 +57,14 @@ extern uint8_t g_openmv_rx_index;
 
 /**
  * @brief  初始化OpenMV通信（启动串口接收中断）
- * @param  huart: UART1句柄
  */
-void OpenMV_Init(UART_HandleTypeDef *huart);
+void OpenMV_Init(void);
 
 /**
  * @brief  向OpenMV发送识别指令
- * @param  huart: UART1句柄
  * @param  cmd: 命令字节（如 OPENMV_CMD_DETECT）
  */
-void OpenMV_SendCmd(UART_HandleTypeDef *huart, uint8_t cmd);
+void OpenMV_SendCmd(uint8_t cmd);
 
 /**
  * @brief  解析OpenMV返回数据（在串口接收中断回调中调用）

@@ -6,7 +6,7 @@
 #ifndef __PID_H
 #define __PID_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 
 /* ======================== PID 结构体 ======================== */
 typedef struct {

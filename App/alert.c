@@ -7,50 +7,53 @@
 
 #include "alert.h"
 
+extern void delay_ms(__IO uint32_t nTime);
+
 /**
  * @brief  声光模块 GPIO 初始化
  */
 void Alert_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitTypeDef GPIO_InitStruct;
 
-    __HAL_RCC_GPIOE_CLK_ENABLE();
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOE, ENABLE);
 
     /* PE1=LED, PE2=蜂鸣器，推挽输出 */
-    GPIO_InitStruct.Pin   = LED_PIN | BUZZER_PIN;
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+    GPIO_InitStruct.GPIO_Pin   = LED_PIN | BUZZER_PIN;
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_OUT;
+    GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_NOPULL;
+    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_2MHz;
+    GPIO_Init(GPIOE, &GPIO_InitStruct);
 
     /* 默认关闭 */
-    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET);
+    GPIO_ResetBits(LED_PORT, LED_PIN);
+    GPIO_ResetBits(BUZZER_PORT, BUZZER_PIN);
 }
 
 void Alert_LED_On(void)
 {
-    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
+    GPIO_SetBits(LED_PORT, LED_PIN);
 }
 
 void Alert_LED_Off(void)
 {
-    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+    GPIO_ResetBits(LED_PORT, LED_PIN);
 }
 
 void Alert_LED_Toggle(void)
 {
-    HAL_GPIO_TogglePin(LED_PORT, LED_PIN);
+    GPIO_ToggleBits(LED_PORT, LED_PIN);
 }
 
 void Alert_Buzzer_On(void)
 {
-    HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_SET);
+    GPIO_SetBits(BUZZER_PORT, BUZZER_PIN);
 }
 
 void Alert_Buzzer_Off(void)
 {
-    HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET);
+    GPIO_ResetBits(BUZZER_PORT, BUZZER_PIN);
 }
 
 /**
@@ -61,7 +64,7 @@ void Alert_Checkpoint(uint16_t duration_ms)
 {
     Alert_LED_On();
     Alert_Buzzer_On();
-    HAL_Delay(duration_ms);
+    delay_ms(duration_ms);
     Alert_LED_Off();
     Alert_Buzzer_Off();
 }
@@ -72,7 +75,7 @@ void Alert_Checkpoint(uint16_t duration_ms)
 void Alert_Beep(void)
 {
     Alert_Buzzer_On();
-    HAL_Delay(200);
+    delay_ms(200);
     Alert_Buzzer_Off();
 }
 
@@ -86,10 +89,10 @@ void Alert_Error(uint8_t count)
     {
         Alert_LED_On();
         Alert_Buzzer_On();
-        HAL_Delay(150);
+        delay_ms(150);
         Alert_LED_Off();
         Alert_Buzzer_Off();
-        HAL_Delay(100);
+        delay_ms(100);
     }
 }
 

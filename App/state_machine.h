@@ -18,7 +18,7 @@
 #ifndef __STATE_MACHINE_H
 #define __STATE_MACHINE_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 
 /* ==================== 状态枚举 ==================== */
 typedef enum {

@@ -15,9 +15,8 @@
 #include "alert.h"
 
 /* ==================== 外部变量（在main.c中定义） ==================== */
-extern TIM_HandleTypeDef htim1;     /* PWM定时器 */
-extern UART_HandleTypeDef huart1;   /* OpenMV串口 */
-extern UART_HandleTypeDef huart2;   /* SYN6658串口 */
+extern uint32_t HAL_GetTick(void);
+extern void delay_ms(__IO uint32_t nTime);
 
 /**
  * @brief  初始化状态机
@@ -92,7 +91,7 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
     /* ==================== 空闲状态 ==================== */
     case STATE_IDLE:
         /* 电机停止，等待启动信号 */
-        Motor_Stop(&htim1);
+        Motor_Stop();
 
         if (event == EVENT_START)
         {
@@ -111,20 +110,20 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
         {
             /* 检测到十字路口/标记线 → 停车检测 */
             sm->checkpoint_count++;
-            Motor_Stop(&htim1);
+            Motor_Stop();
             SM_TransitionTo(sm, STATE_STOP_AND_DETECT);
         }
         else if (event == EVENT_REACHED_END)
         {
             /* 到达终点 */
-            Motor_Stop(&htim1);
+            Motor_Stop();
             SM_TransitionTo(sm, STATE_FINISHED);
         }
         break;
 
     /* ==================== 停车稳定 ==================== */
     case STATE_STOP_AND_DETECT:
-        Motor_Stop(&htim1);
+        Motor_Stop();
 
         /* 等待500ms稳定后进入视觉识别 */
         if (SM_IsTimeout(sm))
@@ -133,14 +132,14 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
             Alert_Checkpoint(500);
 
             /* 发送识别指令给OpenMV */
-            OpenMV_SendCmd(&huart1, OPENMV_CMD_DETECT);
+            OpenMV_SendCmd(OPENMV_CMD_DETECT);
             SM_TransitionTo(sm, STATE_VISION_DETECT);
         }
         break;
 
     /* ==================== 视觉识别 ==================== */
     case STATE_VISION_DETECT:
-        Motor_Stop(&htim1);
+        Motor_Stop();
 
         if (event == EVENT_VISION_DONE)
         {
@@ -150,23 +149,23 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
             OpenMV_ClearNewFlag();
 
             /* 进入语音播报 */
-            SYN6658_ReportPoint(&huart2, sm->checkpoint_count);
-            HAL_Delay(1500);  /* 等待"到达第X个巡检点"播完 */
-            SYN6658_ReportObject(&huart2, sm->detected_obj_id);
+            SYN6658_ReportPoint(sm->checkpoint_count);
+            delay_ms(1500);  /* 等待"到达第X个巡检点"播完 */
+            SYN6658_ReportObject(sm->detected_obj_id);
 
             SM_TransitionTo(sm, STATE_VOICE_REPORT);
         }
         else if (SM_IsTimeout(sm))
         {
             /* 超时未识别到，播报"未识别"后继续巡线 */
-            SYN6658_Speak(&huart2, "未识别到目标");
+            SYN6658_Speak("未识别到目标");
             SM_TransitionTo(sm, STATE_VOICE_REPORT);
         }
         break;
 
     /* ==================== 语音播报 ==================== */
     case STATE_VOICE_REPORT:
-        Motor_Stop(&htim1);
+        Motor_Stop();
 
         if (event == EVENT_VOICE_DONE || SM_IsTimeout(sm))
         {
@@ -185,8 +184,8 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 
     /* ==================== 左转 ==================== */
     case STATE_TURN_LEFT:
-        Motor_SetLeft(&htim1, -300);   /* 左轮反转 */
-        Motor_SetRight(&htim1, 300);   /* 右轮正转 */
+        Motor_SetLeft(-300);   /* 左轮反转 */
+        Motor_SetRight(300);   /* 右轮正转 */
 
         if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
         {
@@ -196,8 +195,8 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 
     /* ==================== 右转 ==================== */
     case STATE_TURN_RIGHT:
-        Motor_SetLeft(&htim1, 300);
-        Motor_SetRight(&htim1, -300);
+        Motor_SetLeft(300);
+        Motor_SetRight(-300);
 
         if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
         {
@@ -207,8 +206,8 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 
     /* ==================== 掉头 ==================== */
     case STATE_U_TURN:
-        Motor_SetLeft(&htim1, -400);
-        Motor_SetRight(&htim1, 400);
+        Motor_SetLeft(-400);
+        Motor_SetRight(400);
 
         if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
         {
@@ -218,7 +217,7 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 
     /* ==================== 任务完成 ==================== */
     case STATE_FINISHED:
-        Motor_Stop(&htim1);
+        Motor_Stop();
         /* 完成提示：三声短促蜂鸣 + LED闪烁 */
         Alert_Error(3);
         Alert_LED_On();  /* 常亮表示已完成 */
@@ -226,7 +225,7 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 
     /* ==================== 错误状态 ==================== */
     case STATE_ERROR:
-        Motor_Stop(&htim1);
+        Motor_Stop();
         /* 错误报警：快速闪烁5次 */
         Alert_Error(5);
         break;

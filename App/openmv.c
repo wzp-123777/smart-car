@@ -36,30 +36,30 @@ static uint8_t s_rx_state = 0;
 static uint8_t s_rx_temp[8] = {0};
 static uint8_t s_rx_cnt = 0;
 
-/* 单字节接收缓冲 */
-static uint8_t s_uart_rx_byte = 0;
-static UART_HandleTypeDef *s_openmv_uart = NULL;
-
 /**
  * @brief  初始化OpenMV通信
  */
-void OpenMV_Init(UART_HandleTypeDef *huart)
+void OpenMV_Init(void)
 {
-    s_openmv_uart = huart;
     s_rx_state = 0;
     s_rx_cnt = 0;
     g_openmv_data.is_valid = 0;
     g_openmv_data.is_new = 0;
+}
 
-    /* 启动串口接收中断（逐字节接收） */
-    HAL_UART_Receive_IT(huart, &s_uart_rx_byte, 1);
+static void USART_SendBytes(USART_TypeDef* USARTx, uint8_t *data, uint16_t len)
+{
+    for(uint16_t i = 0; i < len; i++) {
+        while(USART_GetFlagStatus(USARTx, USART_FLAG_TXE) == RESET);
+        USART_SendData(USARTx, data[i]);
+    }
 }
 
 /**
  * @brief  向OpenMV发送指令
  * @note   协议: [0xAA] [CMD] [校验和] [0x55]
  */
-void OpenMV_SendCmd(UART_HandleTypeDef *huart, uint8_t cmd)
+void OpenMV_SendCmd(uint8_t cmd)
 {
     uint8_t tx_buf[4];
 
@@ -68,7 +68,7 @@ void OpenMV_SendCmd(UART_HandleTypeDef *huart, uint8_t cmd)
     tx_buf[2] = cmd;                 /* 校验和（简单起见=命令本身） */
     tx_buf[3] = OPENMV_CMD_TAIL;    /* 帧尾 0x55 */
 
-    HAL_UART_Transmit(huart, tx_buf, 4, 100);
+    USART_SendBytes(USART1, tx_buf, 4);
 }
 
 /**
@@ -159,20 +159,3 @@ void OpenMV_ClearNewFlag(void)
     g_openmv_data.is_new = 0;
 }
 
-/**
- * @brief  串口接收完成回调（在 stm32f4xx_it.c 或 main.c 中被HAL库自动调用）
- * @note   所有UART的接收完成都会进入此回调，需要判断是哪个UART
- *         此函数已在本模块中实现，如果你的工程有其它UART也用中断接收，
- *         请将此函数移到统一的回调管理处
- */
-void OpenMV_UART_RxCallback(UART_HandleTypeDef *huart)
-{
-    if (huart == s_openmv_uart)
-    {
-        /* 将接收到的字节送入解析器 */
-        OpenMV_ParseByte(s_uart_rx_byte);
-
-        /* 重新启动接收中断（必须！） */
-        HAL_UART_Receive_IT(s_openmv_uart, &s_uart_rx_byte, 1);
-    }
-}

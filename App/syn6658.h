@@ -12,7 +12,7 @@
 #ifndef __SYN6658_H
 #define __SYN6658_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 #include <string.h>
 
 /* ==================== 协议定义 ==================== */
@@ -33,56 +33,51 @@
 
 /**
  * @brief  SYN6658 初始化
- * @param  huart: UART2句柄
  */
-void SYN6658_Init(UART_HandleTypeDef *huart);
+void SYN6658_Init(void);
 
 /**
  * @brief  发送文本进行语音合成（GB2312编码）
- * @param  huart: UART2句柄
  * @param  text: 要播报的中文文本（GB2312编码字符串）
  * @note   在Keil中，中文字符串默认为GB2312编码
- *         例如: SYN6658_Speak(&huart2, "检测到圆形");
+ *         例如: SYN6658_Speak("检测到圆形");
  */
-void SYN6658_Speak(UART_HandleTypeDef *huart, const char *text);
+void SYN6658_Speak(const char *text);
 
 /**
  * @brief  发送带音量/语速控制的语音
- * @param  huart: UART2句柄
  * @param  text: 文本
  * @param  volume: 音量 0~16
  * @param  speed: 语速 0~10
  */
-void SYN6658_SpeakEx(UART_HandleTypeDef *huart, const char *text,
+void SYN6658_SpeakEx(const char *text,
                      uint8_t volume, uint8_t speed);
 
 /**
  * @brief  停止当前播报
  */
-void SYN6658_Stop(UART_HandleTypeDef *huart);
+void SYN6658_Stop(void);
 
 /**
  * @brief  暂停播报
  */
-void SYN6658_Pause(UART_HandleTypeDef *huart);
+void SYN6658_Pause(void);
 
 /**
  * @brief  恢复播报
  */
-void SYN6658_Resume(UART_HandleTypeDef *huart);
+void SYN6658_Resume(void);
 
 /**
  * @brief  根据物体ID播报对应名称
- * @param  huart: UART2句柄
  * @param  object_id: 物体识别ID
  */
-void SYN6658_ReportObject(UART_HandleTypeDef *huart, uint8_t object_id);
+void SYN6658_ReportObject(uint8_t object_id);
 
 /**
  * @brief  播报巡检点位信息
- * @param  huart: UART2句柄
  * @param  point_num: 巡检点编号 (1,2,3...)
  */
-void SYN6658_ReportPoint(UART_HandleTypeDef *huart, uint8_t point_num);
+void SYN6658_ReportPoint(uint8_t point_num);
 
 #endif /* __SYN6658_H */

@@ -11,24 +11,11 @@
 #ifndef __ENCODER_H
 #define __ENCODER_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 
 /* ==================== 函数声明 ==================== */
 
-/**
- * @brief  编码器定时器初始化（编码器接口模式）
- * @param  htim: 定时器句柄（如 &htim2, &htim3）
- * @note   需要在CubeMX中将定时器配置为 Encoder Mode
- *         或者手动调用此函数初始化
- */
-void Encoder_Init(TIM_HandleTypeDef *htim);
-
-/**
- * @brief  读取编码器计数值并清零（每10ms调用一次）
- * @param  htim: 定时器句柄
- * @retval 有符号计数值（正=正转，负=反转）
- * @note   此值代表10ms内的编码器脉冲数，即当前转速
- */
-int16_t Encoder_Read(TIM_HandleTypeDef *htim);
+int16_t Encoder_Read_TIM2(void);
+int16_t Encoder_Read_TIM3(void);
 
 #endif /* __ENCODER_H */

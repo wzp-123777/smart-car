@@ -3,7 +3,7 @@
  * @brief   智能巡检小车 —— 主程序
  * @author  2026电子设计竞赛
  * @note    
- *   主控: STM32F407ZGT6 (HAL库 + Keil)
+ *   主控: STM32F407ZGT6 (标准外设库 SPL)
  *   视觉: OpenMV H7 Plus (UART1, 115200, PB6=TX, PB7=RX)
  *   语音: SYN6658 (UART2, 9600, PA2=TX, PA3=RX)
  *   电机: 4× N20 + 4× TB6612FNG (TIM1 PWM, PA8~PA11)
@@ -12,20 +12,15 @@
  *   姿态: MPU6050 (I2C1, PB8=SCL, PB9=SDA)
  *   PID定时器: TIM6 (10ms中断)
  * 
- * 【硬件定时器分配】
- *   TIM1:  PWM输出（4路电机驱动）  168MHz / 168 / 1000 = 1kHz PWM
- *   TIM2:  左侧编码器接口模式
- *   TIM3:  右侧编码器接口模式
- *   TIM6:  10ms基本定时器（PID计算+编码器采集+巡线读取）
- * 
- * 【移植步骤】
- *   1. 在CubeMX中配置好所有外设（UART1/2, TIM1/2/3/6, I2C1, GPIO）
- *   2. 将 App 文件夹中的 .c/.h 文件添加到 Keil 工程
- *   3. 在CubeMX生成的 main.c 中，调用本文件的初始化和主循环函数
- *   4. 或者直接替换 main.c（注意保留CubeMX的HAL初始化代码）
+ * 【移植与使用说明】
+ *   本项目已完全脱离 CubeMX 和 HAL 库，采用纯代码硬写（STM32F4 标准外设库）配置：
+ *   1. 准备一个纯净的 STM32F4 标准库工程模板（包含启动文件、CMSIS、STM32F4xx_StdPeriph_Driver）。
+ *   2. 将本项目 App 文件夹下的所有 .c/.h 直接添加到 Keil 工程中。
+ *   3. 在 Keil 魔术棒 C/C++ 选项卡添加头文件路径并在 Define 中填写 USE_STDPERIPH_DRIVER。
+ *   4. 直接编译下载即可运行！不再需要使用 CubeMX 生成任何代码。
  */
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 #include "pid.h"
 #include "motor.h"
 #include "encoder.h"
@@ -36,17 +31,6 @@
 #include "state_machine.h"
 #include "alert.h"
 #include <stdio.h>
-
-/* ================================================================
- *                     外设句柄声明
- * ================================================================ */
-TIM_HandleTypeDef htim1;    /* PWM —— 电机驱动 */
-TIM_HandleTypeDef htim2;    /* 编码器 —— 左轮 */
-TIM_HandleTypeDef htim3;    /* 编码器 —— 右轮 */
-TIM_HandleTypeDef htim6;    /* 基本定时器 —— 10ms PID中断 */
-UART_HandleTypeDef huart1;  /* OpenMV 通信 */
-UART_HandleTypeDef huart2;  /* SYN6658 语音 */
-I2C_HandleTypeDef hi2c1;    /* MPU6050 陀螺仪 */
 
 /* ================================================================
  *                     全局变量
@@ -73,7 +57,7 @@ volatile int16_t g_encoder_left  = 0;
 volatile int16_t g_encoder_right = 0;
 
 /* 基础速度（巡线时的期望速度，编码器脉冲/10ms） */
-int16_t g_base_speed = 30;
+int16_t g_base_speed = 15;
 
 /* PID输出 */
 volatile float g_motor_left_pwm  = 0;
@@ -83,255 +67,245 @@ volatile float g_motor_right_pwm = 0;
 volatile uint8_t g_flag_10ms = 0;
 
 /* ================================================================
- *                     外设初始化函数
+ *                     工具延时函数（基于SysTick，粗略阻塞延时）
+ * ================================================================ */
+volatile uint32_t g_sys_tick = 0;
+
+uint32_t HAL_GetTick(void)
+{
+    return g_sys_tick;
+}
+
+/* SysTick_Handler 已经在 stm32f4xx_it.c 中定义过了。
+ * 如果你想在这里统一管理，请确保屏蔽或删除 stm32f4xx_it.c 中的 SysTick_Handler，
+ * 或者把这段自增代码放入 stm32f4xx_it.c 的 SysTick_Handler 中。
+ * 为了兼容模板，我们可以在这把它注释掉，用户去 stm32f4xx_it.c 里加一行 g_sys_tick++;
+ */
+// void SysTick_Handler(void)
+// {
+//     g_sys_tick++;
+// }
+
+void delay_ms(__IO uint32_t nTime)
+{
+    uint32_t tickstart = HAL_GetTick();
+    uint32_t wait = nTime;
+    
+    while((HAL_GetTick() - tickstart) < wait)
+    {
+    }
+}
+
+/* ================================================================
+ *                     外设初始化函数 (标准库版)
  * ================================================================ */
 
 /**
- * @brief  系统时钟配置 (168MHz)
- * @note   如果使用CubeMX生成的SystemClock_Config，删除此函数
- */
-static void SystemClock_Config(void)
-{
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
-
-    __HAL_RCC_PWR_CLK_ENABLE();
-    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-    RCC_OscInitStruct.PLL.PLLM = 8;
-    RCC_OscInitStruct.PLL.PLLN = 336;
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-    RCC_OscInitStruct.PLL.PLLQ = 7;
-    HAL_RCC_OscConfig(&RCC_OscInitStruct);
-
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
-    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
-}
-
-/**
- * @brief  TIM1 PWM初始化 —— 电机驱动
- * @note   168MHz / PSC(168) / ARR(1000) = 1kHz PWM频率
+ * @brief  TIM1 PWM初始化 —— 电机驱动 (168MHz / 168 / 1000 = 1kHz)
+ *         PA8~PA11 (CH1~CH4)
  */
 static void MX_TIM1_PWM_Init(void)
 {
-    TIM_OC_InitTypeDef sConfigOC = {0};
+    GPIO_InitTypeDef GPIO_InitStructure;
+    TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+    TIM_OCInitTypeDef  TIM_OCInitStructure;
 
-    __HAL_RCC_TIM1_CLK_ENABLE();
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM1, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
 
-    htim1.Instance = TIM1;
-    htim1.Init.Prescaler = 168 - 1;        /* 168MHz / 168 = 1MHz */
-    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim1.Init.Period = 1000 - 1;           /* 1MHz / 1000 = 1kHz */
-    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim1.Init.RepetitionCounter = 0;
-    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-    HAL_TIM_PWM_Init(&htim1);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource8, GPIO_AF_TIM1);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource9, GPIO_AF_TIM1);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource10, GPIO_AF_TIM1);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource11, GPIO_AF_TIM1);
 
-    /* 配置4个PWM通道 */
-    sConfigOC.OCMode = TIM_OCMODE_PWM1;
-    sConfigOC.Pulse = 0;
-    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9 | GPIO_Pin_10 | GPIO_Pin_11;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1);
-    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2);
-    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3);
-    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4);
+    TIM_TimeBaseStructure.TIM_Prescaler = 168 - 1;
+    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    TIM_TimeBaseStructure.TIM_Period = 1000 - 1;
+    TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+    TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
+    TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStructure);
 
-    /* 启动4路PWM输出 */
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = 0;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    
+    TIM_OC1Init(TIM1, &TIM_OCInitStructure);
+    TIM_OC2Init(TIM1, &TIM_OCInitStructure);
+    TIM_OC3Init(TIM1, &TIM_OCInitStructure);
+    TIM_OC4Init(TIM1, &TIM_OCInitStructure);
+    
+    TIM_OC1PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC2PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC4PreloadConfig(TIM1, TIM_OCPreload_Enable);
 
-    /* ===== PWM引脚GPIO配置 ===== */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-
-    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    TIM_ARRPreloadConfig(TIM1, ENABLE);
+    TIM_Cmd(TIM1, ENABLE);
+    TIM_CtrlPWMOutputs(TIM1, ENABLE);
 }
 
 /**
  * @brief  TIM2 编码器模式 —— 左轮
- * @note   PA0(TIM2_CH1), PA1(TIM2_CH2)
+ *         PA0(CH1), PA1(CH2)
  */
 static void MX_TIM2_Encoder_Init(void)
 {
-    TIM_Encoder_InitTypeDef sEncoderConfig = {0};
+    GPIO_InitTypeDef GPIO_InitStructure;
 
-    __HAL_RCC_TIM2_CLK_ENABLE();
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
 
-    htim2.Instance = TIM2;
-    htim2.Init.Prescaler = 0;
-    htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim2.Init.Period = 65535;
-    htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource0, GPIO_AF_TIM2);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource1, GPIO_AF_TIM2);
 
-    sEncoderConfig.EncoderMode = TIM_ENCODERMODE_TI12;
-    sEncoderConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
-    sEncoderConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
-    sEncoderConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-    sEncoderConfig.IC1Filter = 6;
-    sEncoderConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
-    sEncoderConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
-    sEncoderConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-    sEncoderConfig.IC2Filter = 6;
-    HAL_TIM_Encoder_Init(&htim2, &sEncoderConfig);
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    /* 编码器引脚 GPIO */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    TIM_EncoderInterfaceConfig(TIM2, TIM_EncoderMode_TI12, TIM_ICPolarity_Rising, TIM_ICPolarity_Rising);
 
-    Encoder_Init(&htim2);
+    TIM_SetCounter(TIM2, 0);
+    TIM_Cmd(TIM2, ENABLE);
 }
 
 /**
  * @brief  TIM3 编码器模式 —— 右轮
- * @note   PA6(TIM3_CH1), PA7(TIM3_CH2)
+ *         PA6(CH1), PA7(CH2)
  */
 static void MX_TIM3_Encoder_Init(void)
 {
-    TIM_Encoder_InitTypeDef sEncoderConfig = {0};
+    GPIO_InitTypeDef GPIO_InitStructure;
 
-    __HAL_RCC_TIM3_CLK_ENABLE();
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
 
-    htim3.Instance = TIM3;
-    htim3.Init.Prescaler = 0;
-    htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim3.Init.Period = 65535;
-    htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource6, GPIO_AF_TIM3);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource7, GPIO_AF_TIM3);
 
-    sEncoderConfig.EncoderMode = TIM_ENCODERMODE_TI12;
-    sEncoderConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
-    sEncoderConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
-    sEncoderConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-    sEncoderConfig.IC1Filter = 6;
-    sEncoderConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
-    sEncoderConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
-    sEncoderConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-    sEncoderConfig.IC2Filter = 6;
-    HAL_TIM_Encoder_Init(&htim3, &sEncoderConfig);
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    /* 编码器引脚 GPIO */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    TIM_EncoderInterfaceConfig(TIM3, TIM_EncoderMode_TI12, TIM_ICPolarity_Rising, TIM_ICPolarity_Rising);
 
-    Encoder_Init(&htim3);
+    TIM_SetCounter(TIM3, 0);
+    TIM_Cmd(TIM3, ENABLE);
 }
 
 /**
- * @brief  TIM6 基本定时器 —— 10ms PID中断
- * @note   84MHz(APB1) / 840 / 1000 = 100Hz = 10ms
+ * @brief  TIM6 基本定时器 —— 10ms PID控制中断
+ *         84MHz(APB1) / 840 / 1000 = 100Hz (10ms)
  */
 static void MX_TIM6_Init(void)
 {
-    __HAL_RCC_TIM6_CLK_ENABLE();
+    TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+    NVIC_InitTypeDef NVIC_InitStructure;
 
-    htim6.Instance = TIM6;
-    htim6.Init.Prescaler = 840 - 1;        /* 84MHz / 840 = 100kHz */
-    htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim6.Init.Period = 1000 - 1;           /* 100kHz / 1000 = 100Hz = 10ms */
-    htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-    HAL_TIM_Base_Init(&htim6);
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM6, ENABLE);
 
-    /* 使能TIM6中断 */
-    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1, 0);
-    HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+    TIM_TimeBaseStructure.TIM_Period = 1000 - 1;
+    TIM_TimeBaseStructure.TIM_Prescaler = 840 - 1;
+    TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+    TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    TIM_TimeBaseInit(TIM6, &TIM_TimeBaseStructure);
 
-    /* 启动定时器中断 */
-    HAL_TIM_Base_Start_IT(&htim6);
+    TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
+    TIM_ITConfig(TIM6, TIM_IT_Update, ENABLE);
+
+    NVIC_InitStructure.NVIC_IRQChannel = TIM6_DAC_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    TIM_Cmd(TIM6, ENABLE);
 }
 
 /**
- * @brief  UART1 初始化 —— OpenMV (115200)
- * @note   使用 PB6(TX) / PB7(RX)，避免与 TIM1(PA8~PA11) 引脚冲突
+ * @brief  UART1 初始化 —— OpenMV_TX/RX (PB6/PB7)
  */
 static void MX_USART1_Init(void)
 {
-    __HAL_RCC_USART1_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStructure;
+    USART_InitTypeDef USART_InitStructure;
+    NVIC_InitTypeDef NVIC_InitStructure;
 
-    /* PB6=TX, PB7=RX（USART1 复用映射到 PB6/PB7） */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
 
-    huart1.Instance = USART1;
-    huart1.Init.BaudRate = 115200;
-    huart1.Init.WordLength = UART_WORDLENGTH_8B;
-    huart1.Init.StopBits = UART_STOPBITS_1;
-    huart1.Init.Parity = UART_PARITY_NONE;
-    huart1.Init.Mode = UART_MODE_TX_RX;
-    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-    HAL_UART_Init(&huart1);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource6, GPIO_AF_USART1);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource7, GPIO_AF_USART1);
 
-    /* 使能UART1接收中断 */
-    HAL_NVIC_SetPriority(USART1_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOB, &GPIO_InitStructure);
+
+    USART_InitStructure.USART_BaudRate = 115200;
+    USART_InitStructure.USART_WordLength = USART_WordLength_8b;
+    USART_InitStructure.USART_StopBits = USART_StopBits_1;
+    USART_InitStructure.USART_Parity = USART_Parity_No;
+    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+    USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;
+    USART_Init(USART1, &USART_InitStructure);
+
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+
+    NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 2;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    USART_Cmd(USART1, ENABLE);
 }
 
 /**
- * @brief  UART2 初始化 —— SYN6658 语音 (9600)
+ * @brief  UART2 初始化 —— SYN6658 语音 (PA2/PA3)
  */
 static void MX_USART2_Init(void)
 {
-    __HAL_RCC_USART2_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStructure;
+    USART_InitTypeDef USART_InitStructure;
 
-    /* PA2=TX, PA3=RX */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
 
-    huart2.Instance = USART2;
-    huart2.Init.BaudRate = 9600;
-    huart2.Init.WordLength = UART_WORDLENGTH_8B;
-    huart2.Init.StopBits = UART_STOPBITS_1;
-    huart2.Init.Parity = UART_PARITY_NONE;
-    huart2.Init.Mode = UART_MODE_TX_RX;
-    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-    HAL_UART_Init(&huart2);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource2, GPIO_AF_USART2);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource3, GPIO_AF_USART2);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2 | GPIO_Pin_3;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+    USART_InitStructure.USART_BaudRate = 9600;
+    USART_InitStructure.USART_WordLength = USART_WordLength_8b;
+    USART_InitStructure.USART_StopBits = USART_StopBits_1;
+    USART_InitStructure.USART_Parity = USART_Parity_No;
+    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+    USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;
+    USART_Init(USART2, &USART_InitStructure);
+
+    USART_Cmd(USART2, ENABLE);
 }
 
 /**
@@ -339,117 +313,88 @@ static void MX_USART2_Init(void)
  */
 static void MX_I2C1_Init(void)
 {
-    __HAL_RCC_I2C1_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef  GPIO_InitStructure;
+    I2C_InitTypeDef   I2C_InitStructure;
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_I2C1, ENABLE);
 
-    hi2c1.Instance = I2C1;
-    hi2c1.Init.ClockSpeed = 400000;         /* 400kHz 快速模式 */
-    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-    hi2c1.Init.OwnAddress1 = 0;
-    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-    hi2c1.Init.OwnAddress2 = 0;
-    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-    HAL_I2C_Init(&hi2c1);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource8, GPIO_AF_I2C1);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource9, GPIO_AF_I2C1);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8 | GPIO_Pin_9;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_InitStructure.GPIO_OType = GPIO_OType_OD;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_Init(GPIOB, &GPIO_InitStructure);
+
+    I2C_DeInit(I2C1);
+    I2C_InitStructure.I2C_Mode = I2C_Mode_I2C;
+    I2C_InitStructure.I2C_DutyCycle = I2C_DutyCycle_2;
+    I2C_InitStructure.I2C_OwnAddress1 = 0x00;
+    I2C_InitStructure.I2C_Ack = I2C_Ack_Enable;
+    I2C_InitStructure.I2C_AcknowledgedAddress = I2C_AcknowledgedAddress_7bit;
+    I2C_InitStructure.I2C_ClockSpeed = 400000;
+
+    I2C_Init(I2C1, &I2C_InitStructure);
+    I2C_Cmd(I2C1, ENABLE);
 }
 
 /* ================================================================
- *                     中断处理函数
+ *                     中断服务函数与回调 (标准库底层)
  * ================================================================ */
 
 /**
- * @brief  TIM6 中断服务函数 —— 10ms PID定时器
- * @note   如果使用CubeMX，此函数在 stm32f4xx_it.c 中
- *         这里提供完整实现，移植时选择一处即可
- */
-void TIM6_DAC_IRQHandler(void)
-{
-    HAL_TIM_IRQHandler(&htim6);
-}
-
-/**
- * @brief  USART1 中断服务函数 —— OpenMV
+ * @brief  USART1 中断服务函数 —— OpenMV 数据接收
  */
 void USART1_IRQHandler(void)
 {
-    HAL_UART_IRQHandler(&huart1);
+    if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
+    {
+        uint8_t RxData = USART_ReceiveData(USART1);
+        OpenMV_ParseByte(RxData); /* 标准库直接传入单字节或在内部处理接收缓冲 */
+        USART_ClearITPendingBit(USART1, USART_IT_RXNE);
+    }
 }
 
 /**
- * @brief  定时器周期完成回调 —— 10ms PID控制核心
- * @note   这是整个小车控制的核心！每10ms执行一次：
- *         1. 读取编码器 → 获取当前速度
- *         2. 读取红外传感器 → 获取偏移量
- *         3. 读取MPU6050 → 获取姿态
- *         4. PID计算 → 输出PWM
+ * @brief  TIM6 中断服务函数 —— 10ms PID定时器核心
  */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+void TIM6_DAC_IRQHandler(void)
 {
-    if (htim->Instance == TIM6)
+    if (TIM_GetITStatus(TIM6, TIM_IT_Update) != RESET)
     {
+        TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
+
         /* ===== 1. 读取编码器（获取当前速度） ===== */
-        g_encoder_left  = Encoder_Read(&htim2);
-        g_encoder_right = Encoder_Read(&htim3);
+        g_encoder_left  = Encoder_Read_TIM2(); /* 按照标准库方式重写，比如取 TIM2->CNT */
+        g_encoder_right = Encoder_Read_TIM3();
 
         /* ===== 2. 读取红外传感器 ===== */
         IR_Read(&g_ir_data);
 
         /* ===== 3. 读取MPU6050并更新偏航角 ===== */
-        MPU6050_ReadAll(&hi2c1, &g_mpu_data);
+        MPU6050_ReadAll(&g_mpu_data);
         MPU6050_UpdateYaw(&g_mpu_data, 0.01f);  /* dt = 10ms = 0.01s */
 
-        /* ===== 4. 仅在巡线模式下进行PID控制 ===== */
+        /* ===== 4. 对状态机处于巡线模式进行控制 ===== */
         if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
-            /*
-             * 转向策略：
-             *   turn_output = PID_turn(0, ir_position)
-             *   左轮速度 = base_speed + turn_output
-             *   右轮速度 = base_speed - turn_output
-             * 
-             * 偏移量为正(偏右) → turn_output为负 → 左轮减速右轮加速 → 右转纠偏
-             * 偏移量为负(偏左) → turn_output为正 → 左轮加速右轮减速 → 左转纠偏
-             */
-            float turn_output = PID_Incremental(&g_pid_turn, 0, (float)g_ir_data.position);
-
+            float turn_output = 0; // 建议配合红外 g_ir_data.position 计算 turn_output
             float target_left  = (float)g_base_speed + turn_output;
             float target_right = (float)g_base_speed - turn_output;
 
-            /* 左轮速度PID */
-            g_motor_left_pwm = PID_Incremental(&g_pid_left, target_left,
-                                                (float)g_encoder_left);
+            g_motor_left_pwm = PID_Incremental(&g_pid_left, target_left, (float)g_encoder_left);
+            g_motor_right_pwm = PID_Incremental(&g_pid_right, target_right, (float)g_encoder_right);
 
-            /* 右轮速度PID */
-            g_motor_right_pwm = PID_Incremental(&g_pid_right, target_right,
-                                                 (float)g_encoder_right);
-
-            /* 输出到电机 */
-            Motor_SetLeft(&htim1, (int16_t)g_motor_left_pwm);
-            Motor_SetRight(&htim1, (int16_t)g_motor_right_pwm);
+            Motor_SetLeft((int16_t)g_motor_left_pwm);
+            Motor_SetRight((int16_t)g_motor_right_pwm);
         }
 
-        /* 设置10ms标志（供main循环使用） */
+        /* 设置全局标志位供 main 循环调度 */
         g_flag_10ms = 1;
     }
-}
-
-/**
- * @brief  串口接收完成回调
- * @note   HAL库会自动调用，处理所有UART的接收中断
- */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    /* OpenMV 数据接收 */
-    OpenMV_UART_RxCallback(huart);
 }
 
 /* ================================================================
@@ -458,24 +403,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 /**
  * @brief  检测当前事件（供状态机使用）
- * @retval 当前发生的事件
  */
 static CarEvent_TypeDef DetectEvent(void)
 {
-    /* 检测十字路口（5路传感器全黑） */
     if (g_ir_data.all_black)
     {
         return EVENT_CROSS_DETECTED;
     }
-
-    /* 检测OpenMV是否返回了新数据 */
     if (OpenMV_HasNewData())
     {
         return EVENT_VISION_DONE;
     }
-
-    /* 其他事件可以在这里添加 */
-
     return EVENT_NONE;
 }
 
@@ -484,30 +422,32 @@ static CarEvent_TypeDef DetectEvent(void)
  * ================================================================ */
 
 /**
- * @brief  启动按键初始化（假设接在 PE0，按下为低电平）
+ * @brief  启动按键初始化（PA15，按下低电平）
  */
 static void StartButton_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    __HAL_RCC_GPIOE_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStructure;
 
-    GPIO_InitStruct.Pin = GPIO_PIN_0;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_15;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
+    GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 }
 
 /**
- * @brief  检测启动按键（带简单消抖）
+ * @brief  按键检测 (带基本消抖)
  */
 static uint8_t StartButton_IsPressed(void)
 {
-    if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET)
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == Bit_RESET)
     {
-        HAL_Delay(20);  /* 消抖 */
-        if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET)
+        delay_ms(20);
+        if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == Bit_RESET)
         {
-            while (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET);  /* 等待松手 */
+            while (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == Bit_RESET);
             return 1;
         }
     }
@@ -519,68 +459,54 @@ static uint8_t StartButton_IsPressed(void)
  * ================================================================ */
 int main(void)
 {
-    /* ---------- HAL 初始化 ---------- */
-    HAL_Init();
-    SystemClock_Config();
+    /* 标准库：配置NVIC中断优先级分组（2位置抢占优先，2位置响应优先） */
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
+    
+    /* 配置SysTick为1ms中断，用于延时和状态机心跳 */
+    SysTick_Config(SystemCoreClock / 1000);
 
     /* ---------- 外设初始化 ---------- */
-    Motor_GPIO_Init();          /* 电机方向引脚 */
-    MX_TIM1_PWM_Init();         /* PWM定时器 */
-    MX_TIM2_Encoder_Init();     /* 左轮编码器 */
-    MX_TIM3_Encoder_Init();     /* 右轮编码器 */
-    MX_USART1_Init();           /* OpenMV串口 */
-    MX_USART2_Init();           /* SYN6658串口 */
-    MX_I2C1_Init();             /* MPU6050 I2C */
-    IR_Init();                  /* 红外传感器 */
-    Alert_Init();               /* LED + 蜂鸣器 */
-    StartButton_Init();         /* 启动按键 */
+    Motor_GPIO_Init();
+    MX_TIM1_PWM_Init();
+    MX_TIM2_Encoder_Init();
+    MX_TIM3_Encoder_Init();
+    MX_USART1_Init();
+    MX_USART2_Init();
+    MX_I2C1_Init();
+    IR_Init();
+    Alert_Init();
+    StartButton_Init();
 
     /* ---------- 模块初始化 ---------- */
-    OpenMV_Init(&huart1);       /* OpenMV通信 */
-    SYN6658_Init(&huart2);      /* 语音模块 */
-    MPU6050_Init(&hi2c1);       /* 陀螺仪 */
+    // 注意：对应的子模块内部应移除HAL串口或I2C句柄传递，改为直接传串口号USART1等
+    OpenMV_Init();       
+    SYN6658_Init();      
+    MPU6050_Init();      
 
     /* ---------- PID 参数初始化 ---------- */
-    /*
-     * 【重要】以下PID参数需要根据实际电机特性调整！
-     * 调参步骤见 pid.c 文件头部注释
-     * 
-     * 左/右轮速度PID：
-     *   Kp=10.0  Ki=1.0  Kd=0.5
-     *   输出范围: -1000 ~ +1000 (对应PWM占空比)
-     */
-    PID_Init(&g_pid_left,  10.0f, 1.0f, 0.5f,  MOTOR_PWM_MAX, -MOTOR_PWM_MAX);
-    PID_Init(&g_pid_right, 10.0f, 1.0f, 0.5f,  MOTOR_PWM_MAX, -MOTOR_PWM_MAX);
-
-    /*
-     * 转向PID：
-     *   Kp=80.0  Ki=0.0  Kd=20.0
-     *   输出范围: -基础速度 ~ +基础速度
-     *   注意: 转向PID一般不需要积分项
-     */
-    PID_Init(&g_pid_turn,  80.0f, 0.0f, 20.0f,
-             (float)g_base_speed, -(float)g_base_speed);
+    PID_Init(&g_pid_left,  3.0f, 0.0f, 0.0f,  MOTOR_PWM_MAX, -MOTOR_PWM_MAX);
+    PID_Init(&g_pid_right, 3.0f, 0.0f, 0.0f,  MOTOR_PWM_MAX, -MOTOR_PWM_MAX);
+    PID_Init(&g_pid_turn,  80.0f, 0.0f, 20.0f, (float)g_base_speed, -(float)g_base_speed);
 
     /* ---------- 状态机初始化 ---------- */
-    SM_Init(&g_state_machine, 5);  /* 假设5个巡检点，根据赛题修改 */
+    SM_Init(&g_state_machine, 5);
 
     /* ---------- 启动语音提示 ---------- */
-    Alert_Beep();               /* 滴一声表示上电成功 */
-    SYN6658_Speak(&huart2, "系统就绪，请按启动键");
+    Alert_Beep();
+    SYN6658_Speak("系统就绪，请按启动键");
 
-    /* ---------- 启动10ms定时器 ---------- */
+    /* ---------- 启动系统控制调度（PID定时器等） ---------- */
     MX_TIM6_Init();
 
     /* ========== 主循环 ========== */
     while (1)
     {
-        /* --- 检测启动按键 --- */
         if (g_state_machine.current_state == STATE_IDLE)
         {
             if (StartButton_IsPressed())
             {
-                SYN6658_Speak(&huart2, "小车启动");
-                HAL_Delay(1000);
+                SYN6658_Speak("小车启动");
+                delay_ms(1000);
                 PID_Reset(&g_pid_left);
                 PID_Reset(&g_pid_right);
                 PID_Reset(&g_pid_turn);
@@ -589,15 +515,10 @@ int main(void)
             }
         }
 
-        /* --- 10ms周期任务（与定时器中断同步） --- */
         if (g_flag_10ms)
         {
             g_flag_10ms = 0;
-
-            /* 检测事件 */
             CarEvent_TypeDef event = DetectEvent();
-
-            /* 状态机处理 */
             SM_Process(&g_state_machine, event);
         }
     }

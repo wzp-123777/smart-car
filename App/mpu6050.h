@@ -7,7 +7,7 @@
 #ifndef __MPU6050_H
 #define __MPU6050_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 
 /* ==================== MPU6050 寄存器定义 ==================== */
 #define MPU6050_ADDR            0xD0    /* I2C地址（AD0接地=0x68，左移1位=0xD0） */
@@ -43,37 +43,10 @@ typedef struct {
 
 /* ==================== 函数声明 ==================== */
 
-/**
- * @brief  MPU6050 初始化
- * @param  hi2c: I2C句柄
- * @retval 0=成功, 1=失败（未检测到芯片）
- */
-uint8_t MPU6050_Init(I2C_HandleTypeDef *hi2c);
-
-/**
- * @brief  读取所有原始数据（加速度+陀螺仪）
- * @param  hi2c: I2C句柄
- * @param  data: 数据结构指针
- */
-void MPU6050_ReadAll(I2C_HandleTypeDef *hi2c, MPU6050_DataTypeDef *data);
-
-/**
- * @brief  更新偏航角（简单积分法）
- * @param  data: 数据结构指针
- * @param  dt: 采样周期（秒），如 0.01 = 10ms
- * @note   每次PID中断中调用，累积计算Yaw角
- */
+uint8_t MPU6050_Init(void);
+void MPU6050_ReadAll(MPU6050_DataTypeDef *data);
 void MPU6050_UpdateYaw(MPU6050_DataTypeDef *data, float dt);
-
-/**
- * @brief  重置偏航角为0（转弯前调用）
- */
 void MPU6050_ResetYaw(MPU6050_DataTypeDef *data);
-
-/**
- * @brief  获取当前偏航角
- * @retval 偏航角（度）
- */
 float MPU6050_GetYaw(MPU6050_DataTypeDef *data);
 
 #endif /* __MPU6050_H */

@@ -10,14 +10,14 @@
 #ifndef __ALERT_H
 #define __ALERT_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 
 /* ==================== 引脚定义（按实际接线修改）==================== */
 #define LED_PORT        GPIOE
-#define LED_PIN         GPIO_PIN_1
+#define LED_PIN         GPIO_Pin_1
 
 #define BUZZER_PORT     GPIOE
-#define BUZZER_PIN      GPIO_PIN_2
+#define BUZZER_PIN      GPIO_Pin_2
 
 /* ==================== 函数声明 ==================== */
 

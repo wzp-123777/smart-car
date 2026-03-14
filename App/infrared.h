@@ -14,19 +14,19 @@
 #ifndef __INFRARED_H
 #define __INFRARED_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32f4xx.h"
 
 /* ==================== 引脚定义 ==================== */
 #define IR1_PORT    GPIOB
-#define IR1_PIN     GPIO_PIN_10    /* 最左 */
+#define IR1_PIN     GPIO_Pin_10    /* 最左 */
 #define IR2_PORT    GPIOB
-#define IR2_PIN     GPIO_PIN_11
+#define IR2_PIN     GPIO_Pin_11
 #define IR3_PORT    GPIOB
-#define IR3_PIN     GPIO_PIN_12    /* 中间 */
+#define IR3_PIN     GPIO_Pin_12    /* 中间 */
 #define IR4_PORT    GPIOB
-#define IR4_PIN     GPIO_PIN_13
+#define IR4_PIN     GPIO_Pin_13
 #define IR5_PORT    GPIOB
-#define IR5_PIN     GPIO_PIN_14    /* 最右 */
+#define IR5_PIN     GPIO_Pin_14    /* 最右 */
 
 /* 传感器数量 */
 #define IR_SENSOR_COUNT     5

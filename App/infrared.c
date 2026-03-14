@@ -11,17 +11,17 @@
  */
 void IR_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitTypeDef GPIO_InitStruct;
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
 
     /* 配置 PB10~PB14 为上拉输入 */
-    GPIO_InitStruct.Pin   = GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12
-                          | GPIO_PIN_13 | GPIO_PIN_14;
-    GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull  = GPIO_PULLUP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_10 | GPIO_Pin_11 | GPIO_Pin_12
+                               | GPIO_Pin_13 | GPIO_Pin_14;
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IN;
+    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_UP;
+    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
 /**
@@ -32,11 +32,11 @@ void IR_Init(void)
 void IR_Read(IR_DataTypeDef *ir_data)
 {
     /* 读取各路传感器（根据传感器极性决定是否取反） */
-    ir_data->sensor[0] = HAL_GPIO_ReadPin(IR1_PORT, IR1_PIN);  /* 最左 */
-    ir_data->sensor[1] = HAL_GPIO_ReadPin(IR2_PORT, IR2_PIN);
-    ir_data->sensor[2] = HAL_GPIO_ReadPin(IR3_PORT, IR3_PIN);  /* 中间 */
-    ir_data->sensor[3] = HAL_GPIO_ReadPin(IR4_PORT, IR4_PIN);
-    ir_data->sensor[4] = HAL_GPIO_ReadPin(IR5_PORT, IR5_PIN);  /* 最右 */
+    ir_data->sensor[0] = GPIO_ReadInputDataBit(IR1_PORT, IR1_PIN);  /* 最左 */
+    ir_data->sensor[1] = GPIO_ReadInputDataBit(IR2_PORT, IR2_PIN);
+    ir_data->sensor[2] = GPIO_ReadInputDataBit(IR3_PORT, IR3_PIN);  /* 中间 */
+    ir_data->sensor[3] = GPIO_ReadInputDataBit(IR4_PORT, IR4_PIN);
+    ir_data->sensor[4] = GPIO_ReadInputDataBit(IR5_PORT, IR5_PIN);  /* 最右 */
 
     /* 合成原始字节（方便调试和查表） */
     ir_data->raw_byte = (ir_data->sensor[0] << 4)
