@@ -86,13 +86,15 @@ uint32_t HAL_GetTick(void)
 //     g_sys_tick++;
 // }
 
+/* 使用简单的死循环延时，不依赖 SysTick 中断，防止中断死锁导致程序挂掉 */
 void delay_ms(__IO uint32_t nTime)
 {
-    uint32_t tickstart = HAL_GetTick();
-    uint32_t wait = nTime;
-    
-    while((HAL_GetTick() - tickstart) < wait)
+    // 大概的死循环延时 (针对 168MHz 主频)
+    __IO uint32_t i = 0;
+    while(nTime--)
     {
+        i = 25000;
+        while(i--) ;
     }
 }
 
@@ -381,15 +383,18 @@ void TIM6_DAC_IRQHandler(void)
         /* ===== 4. 对状态机处于巡线模式进行控制 ===== */
         if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
-            float turn_output = 0; // 建议配合红外 g_ir_data.position 计算 turn_output
-            float target_left  = (float)g_base_speed + turn_output;
-            float target_right = (float)g_base_speed - turn_output;
-
-            g_motor_left_pwm = PID_Incremental(&g_pid_left, target_left, (float)g_encoder_left);
-            g_motor_right_pwm = PID_Incremental(&g_pid_right, target_right, (float)g_encoder_right);
-
-            Motor_SetLeft((int16_t)g_motor_left_pwm);
-            Motor_SetRight((int16_t)g_motor_right_pwm);
+            // 【极其简单的纯开环测试：不依赖PID，固定输出转速】
+            // 给一个固定 PWM 400（占空比40%），只要电机线没接错必转
+            Motor_SetLeft(400);
+            Motor_SetRight(400);
+            
+            // 【刹车测试】：如果用手指挡住**最左边(IR1)**的红外传感器
+            // 此时反射光增强，通常红外模块输出低电平(0)
+            if (g_ir_data.sensor[0] == 0) 
+            {
+                Motor_Stop(); // 触发断电滑行刹车
+                g_state_machine.current_state = STATE_FINISHED; // 结束运行
+            }
         }
 
         /* 设置全局标志位供 main 循环调度 */
@@ -428,7 +433,11 @@ static void StartButton_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
 
+    /* PA15 默认是 JTAG 的 JTDI 引脚，如果不做特殊配置，无法作为普通按键使用！！ */
+    // 开启按键和备用功能时钟
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+    // 不用像F1那样禁用JTAG，F4中只要把模式改为输入模式即可，但有些芯片可能有坑。
+    // 但是这里最致命的是按键根本读不到状态，我们干脆把测试改为上电就跑！
 
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_15;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
@@ -459,67 +468,32 @@ static uint8_t StartButton_IsPressed(void)
  * ================================================================ */
 int main(void)
 {
-    /* 标准库：配置NVIC中断优先级分组（2位置抢占优先，2位置响应优先） */
+    /* 标准库：配置NVIC中断优先级分组 */      
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
-    
-    /* 配置SysTick为1ms中断，用于延时和状态机心跳 */
-    SysTick_Config(SystemCoreClock / 1000);
 
-    /* ---------- 外设初始化 ---------- */
+    /* 配置SysTick为1ms中断 */
+      // SysTick_Config(SystemCoreClock / 1000);
+    /* ========== 极简外设初始化 ========== */
+    // 其他没插的传感器统统不初始化，防卡死！
     Motor_GPIO_Init();
+    Motor_Enable(1);    /* 开启电机驱动板待机引脚(STBY=1) */
     MX_TIM1_PWM_Init();
-    MX_TIM2_Encoder_Init();
-    MX_TIM3_Encoder_Init();
-    MX_USART1_Init();
-    MX_USART2_Init();
-    MX_I2C1_Init();
-    IR_Init();
-    Alert_Init();
+    
+    // 初始化你用来启动的按键 (PA15)
     StartButton_Init();
 
-    /* ---------- 模块初始化 ---------- */
-    // 注意：对应的子模块内部应移除HAL串口或I2C句柄传递，改为直接传串口号USART1等
-    OpenMV_Init();       
-    SYN6658_Init();      
-    MPU6050_Init();      
+    /* 暴力测试：直接不查按键了，免得按键坑人，上电等3秒直接强制发车跑3秒！ */
+    delay_ms(3000); // 给你三秒时间把车放下
+    
+    // 【前进代码】：暴力发车
+    Motor_SetLeft(600);
+    Motor_SetRight(600);
+    delay_ms(3000); // 跑 3 秒
+    Motor_Stop();   // 强制刹车
 
-    /* ---------- PID 参数初始化 ---------- */
-    PID_Init(&g_pid_left,  3.0f, 0.0f, 0.0f,  MOTOR_PWM_MAX, -MOTOR_PWM_MAX);
-    PID_Init(&g_pid_right, 3.0f, 0.0f, 0.0f,  MOTOR_PWM_MAX, -MOTOR_PWM_MAX);
-    PID_Init(&g_pid_turn,  80.0f, 0.0f, 20.0f, (float)g_base_speed, -(float)g_base_speed);
-
-    /* ---------- 状态机初始化 ---------- */
-    SM_Init(&g_state_machine, 5);
-
-    /* ---------- 启动语音提示 ---------- */
-    Alert_Beep();
-    SYN6658_Speak("系统就绪，请按启动键");
-
-    /* ---------- 启动系统控制调度（PID定时器等） ---------- */
-    MX_TIM6_Init();
-
-    /* ========== 主循环 ========== */
+    /* ========== 极简主循环 ========== */
     while (1)
     {
-        if (g_state_machine.current_state == STATE_IDLE)
-        {
-            if (StartButton_IsPressed())
-            {
-                SYN6658_Speak("小车启动");
-                delay_ms(1000);
-                PID_Reset(&g_pid_left);
-                PID_Reset(&g_pid_right);
-                PID_Reset(&g_pid_turn);
-                MPU6050_ResetYaw(&g_mpu_data);
-                SM_Process(&g_state_machine, EVENT_START);
-            }
-        }
-
-        if (g_flag_10ms)
-        {
-            g_flag_10ms = 0;
-            CarEvent_TypeDef event = DetectEvent();
-            SM_Process(&g_state_machine, event);
-        }
+        // ... (死循环，不再启动)
     }
 }
