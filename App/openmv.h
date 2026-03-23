@@ -1,7 +1,10 @@
 /**
  * @file    openmv.h
  * @brief   STM32 与 OpenMV H7 Plus 串口通信模块
- * @note    通信协议：
+ * @note    当前仓库的 OpenMV/main.py 采用主动识别、主动上报模式。
+ *          本文件仍保留命令帧定义，便于后续切回按需触发。
+ *
+ *          通信协议：
  *          STM32 发送: [帧头0xAA] [命令字节] [校验和] [帧尾0x55]
  *          OpenMV返回: [帧头0xBB] [物体ID] [X坐标高] [X坐标低] [Y坐标高] [Y坐标低] [校验和] [帧尾0x55]
  * 
@@ -30,14 +33,16 @@
 #define OPENMV_RX_TAIL          0x55    /* 返回帧尾 */
 #define OPENMV_RX_BUF_SIZE      16      /* 接收缓冲区大小 */
 
-/* 物体ID定义（根据比赛要求修改） */
+/* 物体ID定义（与 OpenMV/main.py 保持一致） */
 #define OBJ_NONE                0x00    /* 未识别到 */
-#define OBJ_CIRCLE              0x01    /* 圆形 */
-#define OBJ_TRIANGLE            0x02    /* 三角形 */
-#define OBJ_SQUARE              0x03    /* 正方形 */
-#define OBJ_RED                 0x10    /* 红色 */
-#define OBJ_GREEN               0x11    /* 绿色 */
-#define OBJ_BLUE                0x12    /* 蓝色 */
+#define OBJ_LIGHTER             0x01    /* 打火机 */
+#define OBJ_SCISSORS            0x02    /* 剪刀 */
+#define OBJ_HAMMER              0x03    /* 锤子 */
+
+/* 兼容旧命名，避免其他文件引用时出错 */
+#define OBJ_CIRCLE              OBJ_LIGHTER
+#define OBJ_TRIANGLE            OBJ_SCISSORS
+#define OBJ_SQUARE              OBJ_HAMMER
 
 /* ==================== 数据结构 ==================== */
 typedef struct {
@@ -49,7 +54,7 @@ typedef struct {
 } OpenMV_DataTypeDef;
 
 /* ==================== 全局变量（extern） ==================== */
-extern OpenMV_DataTypeDef g_openmv_data;
+extern volatile OpenMV_DataTypeDef g_openmv_data;
 extern uint8_t g_openmv_rx_buf[OPENMV_RX_BUF_SIZE];
 extern uint8_t g_openmv_rx_index;
 

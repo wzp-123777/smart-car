@@ -1,0 +1,27 @@
+*** Using Compiler 'V5.06 update 7 (build 960)', folder: 'D:\keil\ARM\ARMCC\Bin'
+Build target 'STM32F407'
+compiling main.c...
+D:\KeilMDKARM5.35\smart-car\App\main.c(555): warning:  #870-D: invalid multibyte character sequence
+              SYN6658_Speak("发生碰撞，紧急停�?  ");
+D:\KeilMDKARM5.35\smart-car\App\main.c(566): warning:  #870-D: invalid multibyte character sequence
+                  SYN6658_Speak("发现打火�?  ");
+D:\KeilMDKARM5.35\smart-car\App\main.c(161): warning:  #177-D: function "MX_TIM2_Encoder_Init"  was declared but never referenced
+  static void MX_TIM2_Encoder_Init(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c(188): warning:  #177-D: function "MX_TIM3_Encoder_Init"  was declared but never referenced
+  static void MX_TIM3_Encoder_Init(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c(215): warning:  #177-D: function "MX_TIM6_Init"  was declared but never referenced
+  static void MX_TIM6_Init(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c(243): warning:  #177-D: function "MX_USART1_Init"  was declared but never referenced
+  static void MX_USART1_Init(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c(316): warning:  #177-D: function "MX_I2C1_Init"  was declared but never referenced
+  static void MX_I2C1_Init(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c(412): warning:  #177-D: function "DetectEvent"  was declared but never referenced
+  static CarEvent_TypeDef DetectEvent(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c(452): warning:  #177-D: function "StartButton_IsPressed"  was declared but never referenced
+  static uint8_t StartButton_IsPressed(void)
+D:\KeilMDKARM5.35\smart-car\App\main.c: 9 warnings, 0 errors
+linking...
+Program Size: Code=4912 RO-data=424 RW-data=68 ZI-data=1124  
+FromELF: creating hex file...
+".\Objects\STM32F429.axf" - 0 Error(s), 9 Warning(s).
+Build Time Elapsed:  00:00:01

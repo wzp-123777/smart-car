@@ -13,15 +13,14 @@ void IR_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct;
 
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
 
-    /* 配置 PB10~PB14 为上拉输入 */
-    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_10 | GPIO_Pin_11 | GPIO_Pin_12
-                               | GPIO_Pin_13 | GPIO_Pin_14;
+    /* 配置 PD1~PD5 为普通输入，巡线模块本身提供数字输出 */
+    GPIO_InitStruct.GPIO_Pin   = IR1_PIN | IR2_PIN | IR3_PIN | IR4_PIN | IR5_PIN;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IN;
-    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_UP;
+    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_NOPULL;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_Init(GPIOB, &GPIO_InitStruct);
+    GPIO_Init(GPIOD, &GPIO_InitStruct);
 }
 
 /**
@@ -32,11 +31,11 @@ void IR_Init(void)
 void IR_Read(IR_DataTypeDef *ir_data)
 {
     /* 读取各路传感器（根据传感器极性决定是否取反） */
-    ir_data->sensor[0] = GPIO_ReadInputDataBit(IR1_PORT, IR1_PIN);  /* 最左 */
-    ir_data->sensor[1] = GPIO_ReadInputDataBit(IR2_PORT, IR2_PIN);
-    ir_data->sensor[2] = GPIO_ReadInputDataBit(IR3_PORT, IR3_PIN);  /* 中间 */
-    ir_data->sensor[3] = GPIO_ReadInputDataBit(IR4_PORT, IR4_PIN);
-    ir_data->sensor[4] = GPIO_ReadInputDataBit(IR5_PORT, IR5_PIN);  /* 最右 */
+    ir_data->sensor[0] = !GPIO_ReadInputDataBit(IR1_PORT, IR1_PIN);  /* 最左 */
+    ir_data->sensor[1] = !GPIO_ReadInputDataBit(IR2_PORT, IR2_PIN);
+    ir_data->sensor[2] = !GPIO_ReadInputDataBit(IR3_PORT, IR3_PIN);  /* 中间 */
+    ir_data->sensor[3] = !GPIO_ReadInputDataBit(IR4_PORT, IR4_PIN);
+    ir_data->sensor[4] = !GPIO_ReadInputDataBit(IR5_PORT, IR5_PIN);  /* 最右 */
 
     /* 合成原始字节（方便调试和查表） */
     ir_data->raw_byte = (ir_data->sensor[0] << 4)
@@ -81,10 +80,29 @@ int8_t IR_GetPosition(IR_DataTypeDef *ir_data)
         }
     }
 
-    /* 没有检测到黑线，返回0（保持上一次方向，由状态机处理） */
+    /* 没有检测到黑线，返回0（由上层决定如何寻线） */
     if (active_count == 0)
         return 0;
 
-    /* 计算加权平均并返回 */
-    return (int8_t)(weighted_sum / (int16_t)active_count);
+    /*
+     * 用四舍五入而不是直接截断。
+     * 例如 01100/00110 这类两路同时压线的常见情况，直接整除会得到 0，
+     * 小车就不会修正方向，表现成“看起来完全不会循迹”。
+     */
+    if (weighted_sum >= 0)
+    {
+        return (int8_t)((weighted_sum + ((int16_t)active_count / 2)) / (int16_t)active_count);
+    }
+    else
+    {
+        return (int8_t)((weighted_sum - ((int16_t)active_count / 2)) / (int16_t)active_count);
+    }
 }
+
+
+
+
+
+
+
+

@@ -80,4 +80,14 @@ void SYN6658_ReportObject(uint8_t object_id);
  */
 void SYN6658_ReportPoint(uint8_t point_num);
 
+/**
+ * @brief  播报开始运行提示
+ */
+void SYN6658_ReportStartup(void);
+
+/**
+ * @brief  播报碰撞停机提示
+ */
+void SYN6658_ReportCollision(void);
+
 #endif /* __SYN6658_H */

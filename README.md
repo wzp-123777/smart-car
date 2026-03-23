@@ -5,16 +5,19 @@
 ```
 smart-car/
 └── App/
-    ├── main.c              # 主程序（外设初始化 + 状态机主循环 + 中断处理）
+    ├── main.c              # 主程序（外设初始化 + 当前主循环控制）
     ├── pid.h / pid.c       # PID控制器（增量式 + 位置式）
     ├── motor.h / motor.c   # 电机驱动（TB6612FNG PWM控制）
     ├── encoder.h / encoder.c   # 编码器测速（定时器编码器模式）
     ├── infrared.h / infrared.c # 5路红外巡线传感器
     ├── openmv.h / openmv.c     # OpenMV串口通信协议
     ├── syn6658.h / syn6658.c   # SYN6658语音合成驱动
-    ├── mpu6050.h / mpu6050.c   # MPU6050陀螺仪驱动
+    ├── mpu6050.h / mpu6050.c   # 串口姿态模块驱动（当前按 USART3 方案）
     └── state_machine.h / state_machine.c  # 状态机框架
 ```
+
+> 当前 `App/main.c` 走的是简化后的主循环方案：OpenMV 主动上报识别结果，巡线使用直接 PD 调整，编码器/PID/状态机代码仍保留在仓库中但默认未启用。
+> 当前 `main.c` 默认自动启动；`PA15` 的启动按键代码仍保留在文件里，后续如需恢复按键启动可直接接回等待逻辑。
 
 ## 🔌 硬件引脚分配表（已解决所有冲突 ✅）
 
@@ -30,13 +33,13 @@ smart-car/
 | 电机4 方向 | GPIO | PC6, PC7 | IN1, IN2 |
 | 左轮编码器 | TIM2 CH1/CH2 | PA0, PA1 | 编码器模式 |
 | 右轮编码器 | TIM3 CH1/CH2 | PA6, PA7 | 编码器模式 |
-| OpenMV通信 | USART1 | **PB6**(TX), **PB7**(RX) | 115200bps ✅ 已改映射 |
+| OpenMV通信 | USART1 | **PB6**(TX), **PB7**(RX) | 115200bps |
 | SYN6658语音 | USART2 | PA2(TX), PA3(RX) | 9600bps |
-| MPU6050 | I2C1 | PB8(SCL), PB9(SDA) | 400kHz |
-| 红外传感器1~5 | GPIO Input | PB10~PB14 | 上拉输入 |
-| 启动按键 | GPIO Input | PE0 | 上拉，按下低电平 |
+| 串口姿态模块 | USART3 | PB10(TX), PB11(RX) | 当前工程按串口 IMU/JY61 类模块处理 |
+| 红外传感器1~5 | GPIO Input | PD1~PD5 | 当前代码实际使用的 5 路巡线输入 |
+| 启动按键 | GPIO Input | PA15 | 上拉，按下低电平 |
 
-> ✅ **引脚冲突已在代码中解决**：USART1 已从 PA9/PA10 改映射到 PB6/PB7，与 TIM1(PA8~PA11) 不再冲突。
+> 当前代码实际占用关系：`TIM1 -> PA8~PA11`，`OpenMV USART1 -> PB6/PB7`，`串口姿态模块 USART3 -> PB10/PB11`，`红外 -> PD1~PD5`。
 
 ## ⏱️ 定时器分配
 
@@ -45,7 +48,7 @@ smart-car/
 | TIM1 | 4路PWM输出 | 168MHz/168/1000 = 1kHz |
 | TIM2 | 左轮编码器 | 编码器接口模式 |
 | TIM3 | 右轮编码器 | 编码器接口模式 |
-| TIM6 | PID定时中断 | 84MHz/840/1000 = 100Hz(10ms) |
+| TIM6 | PID定时中断 | 84MHz/840/1000 = 100Hz(10ms)，保留框架，当前主循环未启用 |
 
 ## 🔧 移植到Keil工程步骤
 
@@ -53,7 +56,7 @@ smart-car/
 
 1. **创建CubeMX工程**
    - 芯片选择 STM32F407ZGT6
-   - 配置外设：TIM1(PWM), TIM2/3(Encoder), TIM6(基本定时器), USART1, USART2, I2C1
+   - 配置外设：TIM1(PWM), TIM2/3(Encoder), TIM6(基本定时器), USART1, USART2, USART3
    - 使能中断：TIM6, USART1
    - 生成Keil工程
 
@@ -145,6 +148,8 @@ smart-car/
 | 6 | CHK | 校验和 = (ID+Xh+Xl+Yh+Yl) & 0xFF |
 | 7 | 0x55 | 帧尾 |
 
+> 当前仓库里的 [`OpenMV/main.py`](/D:/KeilMDKARM5.35/smart-car/OpenMV/main.py) 采用“主动识别、主动上报”模式，STM32 侧主要负责接收结果；`App/openmv.c` 中保留了命令帧接口，便于后续切回按需触发。
+
 ## 🔄 状态机流程
 
 ```
@@ -181,6 +186,6 @@ smart-car/
 
 1. **编码器方向**：如果电机正转但编码器计数为负，交换编码器A/B相接线
 2. **红外极性**：不同品牌传感器高低电平可能相反，在 `IR_Read()` 中取反
-3. **MPU6050校准**：初始化时会自动校准零偏，确保开机时小车静止
-4. **语音延时**：SYN6658 播报需要时间，状态机中已设置4秒超时
-5. ~~**串口冲突**~~：PA9/PA10 冲突已解决，UART1 已改映射到 PB6/PB7
+3. **姿态模块**：当前工程按串口姿态模块处理，不是 I2C 版 MPU6050 驱动
+4. **语音延时**：SYN6658 播报需要时间，主循环里仍保留了阻塞等待
+5. **串口占用**：`USART1` 给 OpenMV，`USART2` 给 SYN6658，`USART3` 给姿态模块
