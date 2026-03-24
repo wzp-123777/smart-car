@@ -133,6 +133,7 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 
             /* 发送识别指令给OpenMV */
             OpenMV_SendCmd(OPENMV_CMD_DETECT);
+            OpenMV_ClearNewFlag();  /* 清除之前的废弃数据，由于发出了新指令，只等最新的一帧 */
             SM_TransitionTo(sm, STATE_VISION_DETECT);
         }
         break;

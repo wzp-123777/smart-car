@@ -15,9 +15,8 @@ void IR_Init(void)
 
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
 
-    /* 配置 PD1~PD5 为上拉输入 */
-    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3        
-                               | GPIO_Pin_4 | GPIO_Pin_5;
+    /* 配置 PD1~PD5 为普通输入，巡线模块本身提供数字输出 */
+    GPIO_InitStruct.GPIO_Pin   = IR1_PIN | IR2_PIN | IR3_PIN | IR4_PIN | IR5_PIN;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IN;
     GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_NOPULL;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
@@ -54,40 +53,74 @@ void IR_Read(IR_DataTypeDef *ir_data)
 }
 
 /**
- * @brief  加权平均法计算偏移量
- * @note   权重: 最左=-2, 左=-1, 中=0, 右=+1, 最右=+2
- *         偏移量 = 加权和 / 检测到黑线的传感器数量
- * 
- * 示例：
- *   10000 → position = -2（黑线在最左边，小车偏右了，需要左转）
- *   01100 → position = -0.5 ≈ -1（黑线偏左）
- *   00100 → position = 0（居中）
- *   00011 → position = +1.5 ≈ +2（黑线偏右）
- *   00001 → position = +2（黑线在最右边，小车偏左了，需要右转）
+ * @brief  计算当前黑线相对车体中心的位置
+ * @note
+ *   1. 权重从左到右依次为 {-20, -10, 0, 10, 20}，比旧版更细腻。
+ *   2. 当 5 路传感器全部为白色时，说明当前已经丢线。
+ *      这时不再返回 0，而是根据上一拍位置记忆返回 -30 或 +30，
+ *      强制车辆继续朝上一拍的偏移方向找线，避免误判为“完美居中”。
+ *   3. 正常压线时直接做整数平均，依赖 C 语言默认的向零取整特性，
+ *      计算简单、执行开销小。
  */
 int8_t IR_GetPosition(IR_DataTypeDef *ir_data)
 {
+    static int8_t last_position = 0;
+    static const int8_t weights[IR_SENSOR_COUNT] = {-20, -10, 0, 10, 20};
     int16_t weighted_sum = 0;
     uint8_t active_count = 0;
-    int8_t  weights[5] = {2, 1, 0, -1, -2};  /* 从左到右的权重 */
+    int8_t current_position;
     uint8_t i;
 
     for (i = 0; i < IR_SENSOR_COUNT; i++)
     {
-        if (ir_data->sensor[i])
+        if (ir_data->sensor[i] != 0U)
         {
             weighted_sum += weights[i];
             active_count++;
         }
     }
 
-    /* 没有检测到黑线，返回0（保持上一次方向，由状态机处理） */
-    if (active_count == 0)
+    /* 全白丢线：根据上一拍位置强制给出极性方向，避免车辆继续直冲。 */
+    if (active_count == 0U)
+    {
+        if (last_position < 0)
+        {
+            return -30;
+        }
+        if (last_position > 0)
+        {
+            return 30;
+        }
         return 0;
+    }
 
-    /* 计算加权平均并返回 */
-    return (int8_t)(weighted_sum / (int16_t)active_count);
+    /* 正常检测到黑线时，直接整除得到平滑位置值。 */
+    current_position = (int8_t)(weighted_sum / (int16_t)active_count);
+
+    /* 更新历史位置，为下一次丢线判断提供方向记忆。非零才更新，避免正好居中丢线时失去极性记忆 */
+    static uint8_t zero_count = 0;
+    if (current_position != 0)
+    {
+        last_position = current_position;
+        zero_count = 0;
+    }
+    else
+    {
+        zero_count++;
+        // 如果连续超过5拍(50ms)稳定在0，才认为真正处于绝对直线，此时清除极性记忆
+        if (zero_count > 5)
+        {
+            last_position = 0;
+            zero_count = 5; // 防止溢出
+        }
+    }
+
+    return current_position;
 }
+
+
+
+
 
 
 

@@ -16,8 +16,9 @@ smart-car/
     └── state_machine.h / state_machine.c  # 状态机框架
 ```
 
-> 当前 `App/main.c` 走的是简化后的主循环方案：OpenMV 主动上报识别结果，巡线使用直接 PD 调整，编码器/PID/状态机代码仍保留在仓库中但默认未启用。
-> 当前 `main.c` 默认自动启动；`PA15` 的启动按键代码仍保留在文件里，后续如需恢复按键启动可直接接回等待逻辑。
+> 当前 `App/main.c` 走的是简化后的主循环方案：OpenMV 主动上报识别结果，巡线使用 5 路红外规则式减速差速控制，编码器/PID/状态机代码仍保留在仓库中但默认未启用。
+> 当前 `main.c` 仍然通过 `PA15` 启动按键进入运行状态，不是上电自动启动。
+> 当前调试阶段已收敛为“只循迹、不处理检查点”，当前 `App/main.c` 已改为 5 路红外规则式循迹：以左右两侧红外分值比较决定转向，只有中间一路单独压线时直行；按当前实车方向，左侧分值更大时改为 `PA9/PA11`（右侧）反转，左侧外轮允许提速形成更大差速；右侧分值更大时改为 `PA8/PA10`（左侧）反转，右侧外轮允许提速形成更大差速。当前实现会按偏差强度自动区分普通弯道和重弯：中间仍压线的小弯优先用较低的 `CURVE_OUTER`，中间丢失或偏差很大时直接切到 `EDGE_OUTER=500` 获取最大转弯差速。当前所有输出占空比都被限制在 `50%` 以内，同时主循环刷新周期已缩短到 `5ms`，串口调试发送节流为 `150ms` 一次以减少阻塞。
 
 ## 🔌 硬件引脚分配表（已解决所有冲突 ✅）
 
@@ -35,7 +36,7 @@ smart-car/
 | 右轮编码器 | TIM3 CH1/CH2 | PA6, PA7 | 编码器模式 |
 | OpenMV通信 | USART1 | **PB6**(TX), **PB7**(RX) | 115200bps |
 | SYN6658语音 | USART2 | PA2(TX), PA3(RX) | 9600bps |
-| 串口姿态模块 | USART3 | PB10(TX), PB11(RX) | 当前工程按串口 IMU/JY61 类模块处理 |
+| MPU6050姿态模块 (串口通信版) | USART3 | PB10(TX), PB11(RX) | 使用串口通信，波特率115200，区别于普通I2C模块 |
 | 红外传感器1~5 | GPIO Input | PD1~PD5 | 当前代码实际使用的 5 路巡线输入 |
 | 启动按键 | GPIO Input | PA15 | 上拉，按下低电平 |
 
@@ -174,18 +175,20 @@ smart-car/
 | 需要修改的内容 | 修改位置 | 说明 |
 |---------------|----------|------|
 | 巡检点数量 | main.c → `SM_Init(&g_state_machine, 5)` | 修改数字即可 |
-| 基础速度 | main.c → `g_base_speed = 30` | 增大提速 |
-| 速度PID参数 | main.c → `PID_Init(&g_pid_left, ...)` | 调Kp/Ki/Kd |
-| 转向PID参数 | main.c → `PID_Init(&g_pid_turn, ...)` | 调Kp/Kd |
+| 直行/转向速度 | main.c → `LINE_FOLLOW_SPEED_RUN / TURN / CURVE_OUTER / EDGE_OUTER / SEARCH / WIDE` | 当前规则式循迹转向时内侧轮反转（`TURN=-180`）；普通弯道使用 `CURVE_OUTER=380`，重弯/中间丢线直接切到 `EDGE_OUTER=500`，所有值都限制在 `50%` 以内 |
+| 主循环/调试节流 | main.c → `LINE_FOLLOW_LOOP_DELAY_MS / LINE_DEBUG_INTERVAL_MS` | 当前控制周期 `5ms`，串口调试发送间隔 `150ms`，减少串口阻塞导致的响应滞后 |
+| 速度PID参数 | main.c → `PID_Init(&g_pid_left, ...)` | 当前简化循迹默认未启用 |
+| 转向PID参数 | main.c → `PID_Init(&g_pid_turn, ...)` | 当前简化循迹默认未启用 |
 | 物体名称 | syn6658.c → `SYN6658_ReportObject()` | 修改播报文本 |
 | 物体ID映射 | openmv.h → `OBJ_xxx` 宏定义 | 与OpenMV端对应 |
 | 停车判断条件 | main.c → `DetectEvent()` | 修改标记检测逻辑 |
 | 红外传感器极性 | infrared.c → `IR_Read()` | 取反读取值 |
+| 左右纠偏方向 | main.c → `LineFollow_RunByRawIR()` | 按当前实车方向，左侧命中黑线时减右侧（PA9/PA11），右侧命中黑线时减左侧（PA8/PA10） |
 
 ## ⚡ 注意事项
 
 1. **编码器方向**：如果电机正转但编码器计数为负，交换编码器A/B相接线
 2. **红外极性**：不同品牌传感器高低电平可能相反，在 `IR_Read()` 中取反
-3. **姿态模块**：当前工程按串口姿态模块处理，不是 I2C 版 MPU6050 驱动
+3. **MPU姿态模块**：由于采用的是串口输出通信的 MPU6050 / JY61，非原生 I2C 接口，请务必直接接在 USART3 (PB10/PB11)。不要接 I2C 引脚。
 4. **语音延时**：SYN6658 播报需要时间，主循环里仍保留了阻塞等待
 5. **串口占用**：`USART1` 给 OpenMV，`USART2` 给 SYN6658，`USART3` 给姿态模块

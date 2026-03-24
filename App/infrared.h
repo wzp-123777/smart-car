@@ -30,5 +30,6 @@ typedef struct {
 void IR_Init(void);
 void IR_Read(IR_DataTypeDef *ir_data);
 int8_t IR_GetPosition(IR_DataTypeDef *ir_data);
+void IR_ResetTracking(void);
 
 #endif
