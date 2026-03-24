@@ -56,6 +56,23 @@ volatile float g_motor_left_pwm  = 0;
 volatile float g_motor_right_pwm = 0;
 /* 10ms????? */
 volatile uint8_t g_flag_10ms = 0;
+
+static int16_t g_line_follow_last_dir = 0;
+static int16_t g_line_debug_left_pwm = 0;
+static int16_t g_line_debug_right_pwm = 0;
+static uint8_t g_line_debug_left_score = 0;
+static uint8_t g_line_debug_right_score = 0;
+static const char *g_line_debug_mode = "INIT";
+
+#define LINE_DEBUG_INTERVAL_MS     150U
+#define LINE_FOLLOW_LOOP_DELAY_MS    5U
+#define LINE_FOLLOW_PWM_LIMIT      500
+#define LINE_FOLLOW_SPEED_RUN      200
+#define LINE_FOLLOW_SPEED_TURN     (-180)   /* 转弯修正时减速轮反相 */
+#define LINE_FOLLOW_SPEED_CURVE_OUTER 380
+#define LINE_FOLLOW_SPEED_EDGE_OUTER  500
+#define LINE_FOLLOW_SPEED_SEARCH   420
+#define LINE_FOLLOW_SPEED_WIDE     140
 /* ================================================================
 *                     ?????????????????SysTick???????????????
 * ================================================================ */
@@ -78,6 +95,154 @@ void delay_ms(__IO uint32_t nTime)
 {
 uint32_t start_time = HAL_GetTick();
 while ((HAL_GetTick() - start_time) < nTime);
+}
+
+static void Debug_USART_SendString(USART_TypeDef *USARTx, const char *str)
+{
+while (*str != '\0')
+{
+while (USART_GetFlagStatus(USARTx, USART_FLAG_TXE) == RESET);
+USART_SendData(USARTx, (uint8_t)(*str));
+str++;
+}
+}
+
+static void Debug_LogIR(CarEvent_TypeDef event)
+{
+char buf[168];
+static uint32_t last_debug_tick = 0;
+uint32_t now;
+
+now = HAL_GetTick();
+if ((now - last_debug_tick) < LINE_DEBUG_INTERVAL_MS)
+{
+return;
+}
+last_debug_tick = now;
+
+snprintf(buf,
+         sizeof(buf),
+         "IR bits=%u%u%u%u%u raw=0x%02X pos=%d aw=%u ab=%u ls=%u rs=%u lp=%d rp=%d mode=%s st=%s ev=%d\r\n",
+         g_ir_data.sensor[0],
+         g_ir_data.sensor[1],
+         g_ir_data.sensor[2],
+         g_ir_data.sensor[3],
+         g_ir_data.sensor[4],
+         g_ir_data.raw_byte,
+         g_ir_data.position,
+         g_ir_data.all_white,
+         g_ir_data.all_black,
+         g_line_debug_left_score,
+         g_line_debug_right_score,
+         g_line_debug_left_pwm,
+         g_line_debug_right_pwm,
+         g_line_debug_mode,
+         SM_GetStateName(g_state_machine.current_state),
+         (int)event);
+Debug_USART_SendString(USART3, buf);
+}
+
+static void Debug_LogText(const char *text)
+{
+Debug_USART_SendString(USART3, text);
+}
+
+static int16_t LineFollow_ClampPWM(int16_t pwm)
+{
+if (pwm < (-LINE_FOLLOW_PWM_LIMIT))
+{
+return -LINE_FOLLOW_PWM_LIMIT;
+}
+if (pwm > LINE_FOLLOW_PWM_LIMIT)
+{
+return LINE_FOLLOW_PWM_LIMIT;
+}
+return pwm;
+}
+
+static float track_kp = 60.0f; /* 比例系数 - 根据实际情况微调 */
+static float track_kd = 30.0f; /* 微分系数 - 根据实际情况微调 */
+static float track_last_error = 0.0f;
+
+static void LineFollow_RunByRawIR(void)
+{
+    float error = 0.0f;
+    float p_out = 0.0f;
+    float d_out = 0.0f;
+    float total_adjust = 0.0f;
+    int16_t final_left = 300;
+    int16_t final_right = 300;
+    int16_t inner_speed = 0;
+    uint8_t hit_count = 0;
+
+    /* 
+     * 传感器分布: [0]最左, [1]偏左, [2]中间, [3]偏右, [4]最右 
+     * 压线(黑)时为1。根据位置赋权重计算 error (小车偏向位置)
+     */
+    if (g_ir_data.sensor[0]) { error -= 4.0f; hit_count++; }
+    if (g_ir_data.sensor[1]) { error -= 2.0f; hit_count++; }
+    if (g_ir_data.sensor[2]) { error += 0.0f; hit_count++; }
+    if (g_ir_data.sensor[3]) { error += 2.0f; hit_count++; }
+    if (g_ir_data.sensor[4]) { error += 4.0f; hit_count++; }
+    
+    if (hit_count > 0)
+    {
+        error = error / (float)hit_count; /* 计算平均误差中心 */
+    }
+    else
+    {
+        /* 完全丢失黑线时，使用最后一次记录的误差极性放大（用于锐角大弯找线） */
+        if (track_last_error < 0.0f) { error = -5.0f; }
+        else if (track_last_error > 0.0f) { error = 5.0f; }
+        else { error = 0.0f; }
+    }
+
+    /* PID 计算 */
+    p_out = track_kp * error;
+    d_out = track_kd * (error - track_last_error);
+    total_adjust = p_out + d_out;
+    
+    /* 
+     * 控制策略: 最大限速 300 (即 30%占空比)，坚决不让外侧车轮主动加速！！！
+     * 控制手段: 仅对内侧轮进行减速以形成差速转向（内侧快卡死时差速最大）。
+     */
+    if (total_adjust < 0.0f)
+    {
+        /* error < 0 代表黑线偏左（车体偏右），需左转，大幅减速左方内侧轮 */
+        inner_speed = 300 - (int16_t)(-total_adjust);
+        if (inner_speed < 0) { inner_speed = 0; }
+        final_left = inner_speed;
+        final_right = 300;
+        g_line_debug_mode = "PID_L";
+    }
+    else if (total_adjust > 0.0f)
+    {
+        /* error > 0 代表黑线偏右（车体偏左），需右转，大幅减速右方内侧轮 */
+        inner_speed = 300 - (int16_t)(total_adjust);
+        if (inner_speed < 0) { inner_speed = 0; }
+        final_left = 300;
+        final_right = inner_speed;
+        g_line_debug_mode = "PID_R";
+    }
+    else
+    {
+        /* 完美居中，均满速30% */
+        final_left = 300;
+        final_right = 300;
+        g_line_debug_mode = "PID_C";
+    }
+    
+    /* 更新上一拍误差，用于下一次微分项计算 (需正常压线才记录有效位置) */
+    if (hit_count > 0)
+    {
+        track_last_error = error;
+    }
+    
+    g_line_debug_left_pwm = final_left;
+    g_line_debug_right_pwm = final_right;
+
+    Motor_SetLeft(final_left);
+    Motor_SetRight(final_right);
 }
 /* ================================================================
 *                     ???????????? (??????)
@@ -333,13 +498,10 @@ g_flag_10ms = 1;
 */
 static CarEvent_TypeDef DetectEvent(void)
 {
-if (g_ir_data.all_black)
-{
-return EVENT_CROSS_DETECTED;
-}
+/* 当前阶段只做循迹，不启用巡检点/视觉识别状态切换。 */
 if (OpenMV_HasNewData())
 {
-return EVENT_VISION_DONE;
+OpenMV_ClearNewFlag();
 }
 return EVENT_NONE;
 }
@@ -410,10 +572,28 @@ Motor_Enable(1);
 * ============================================== */
 /* ===== 状态机初始化 ===== */
 SM_Init(&g_state_machine, 3); // 假设总共3个巡检点
+Debug_LogText("DBG USART3 ready\r\n");
 /* wait for start button */
 while (StartButton_IsPressed() == 0)
 {
+IR_Read(&g_ir_data);
+Debug_LogIR(EVENT_NONE);
 delay_ms(10);
+}
+
+IR_ResetTracking();
+IR_Read(&g_ir_data);
+if (g_ir_data.position < 0)
+{
+g_line_follow_last_dir = -1;
+}
+else if (g_ir_data.position > 0)
+{
+g_line_follow_last_dir = 1;
+}
+else
+{
+g_line_follow_last_dir = 0;
 }
 /* ??????????3???????????????? */
 SYN6658_Speak("??????");
@@ -448,39 +628,14 @@ diff_y = g_mpu_data.accel_y - last_mpu.accel_y;
 last_mpu = g_mpu_data;
 /* 4. 推动核心状态机运转 */
 SM_Process(&g_state_machine, event);
+Debug_LogIR(event);
 /* 5. 按照状态机的当前状态执行对应动作 */
         if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
-            /* 黑线循迹闭环 */
-            static int16_t last_position = 0;
-            int16_t speed_base = 300;
-            int16_t turn_offset = 0;
-            int16_t Kp = 3;
-            int16_t Kd = 5;
-            int16_t error = 0;
-            int16_t final_left = 0;
-            int16_t final_right = 0;
-            if (g_ir_data.all_white) {
-                 error = g_ir_data.position;
-                 turn_offset = (Kp * error) + Kd * (error - last_position);
-                 last_position = error;
-                 speed_base = 150;
-            }
-            else {
-                 error = g_ir_data.position;
-                 turn_offset = (Kp * error) + Kd * (error - last_position);
-                 last_position = error;
-            }
-            final_left = speed_base + turn_offset;
-            final_right = speed_base - turn_offset;
-            if(final_left > 1000) final_left = 1000;
-            if(final_left < -1000) final_left = -1000;
-            if(final_right > 1000) final_right = 1000;
-            if(final_right < -1000) final_right = -1000;
-            Motor_SetLeft(final_left);
-            Motor_SetRight(final_right);
+            /* 规则式循迹：弯道优先降速，保证最大占空比不超过 50%。 */
+            LineFollow_RunByRawIR();
         }
-        delay_ms(20);
+        delay_ms(LINE_FOLLOW_LOOP_DELAY_MS);
     }
 }
 
