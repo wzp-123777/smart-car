@@ -204,22 +204,22 @@ static void LineFollow_RunByRawIR(void)
     
     /* 
      * 控制策略: 最大限速 300 (即 30%占空比)，坚决不让外侧车轮主动加速！！！
-     * 控制手段: 仅对内侧轮进行减速以形成差速转向（内侧快卡死时差速最大）。
+     * 控制手段: 仅对内侧轮进行减速甚至反转以形成更大的差速转向。
      */
     if (total_adjust < 0.0f)
     {
-        /* error < 0 代表黑线偏左（车体偏右），需左转，大幅减速左方内侧轮 */
+        /* error < 0 代表黑线偏左（车体偏右），需左转，内侧轮可反转以减小转弯半径 */
         inner_speed = 300 - (int16_t)(-total_adjust);
-        if (inner_speed < 0) { inner_speed = 0; }
+        if (inner_speed < -300) { inner_speed = -300; } /* 允许反向 */
         final_left = inner_speed;
         final_right = 300;
         g_line_debug_mode = "PID_L";
     }
     else if (total_adjust > 0.0f)
     {
-        /* error > 0 代表黑线偏右（车体偏左），需右转，大幅减速右方内侧轮 */
+        /* error > 0 代表黑线偏右（车体偏左），需右转，内侧轮可反转以减小转弯半径 */
         inner_speed = 300 - (int16_t)(total_adjust);
-        if (inner_speed < 0) { inner_speed = 0; }
+        if (inner_speed < -300) { inner_speed = -300; } /* 允许反向 */
         final_left = 300;
         final_right = inner_speed;
         g_line_debug_mode = "PID_R";
