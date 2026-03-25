@@ -10,7 +10,7 @@ int16_t Encoder_Read_TIM2(void)
     int16_t count;
     count = (int16_t)TIM_GetCounter(TIM2);
     TIM_SetCounter(TIM2, 0);
-    return count;
+    return -count; // 左侧编码器需要取反，消除PID正反馈
 }
 
 int16_t Encoder_Read_TIM3(void)
