@@ -160,9 +160,10 @@ return LINE_FOLLOW_PWM_LIMIT;
 return pwm;
 }
 
-static float track_kp = 60.0f; /* 比例系数 - 根据实际情况微调 */
-static float track_kd = 30.0f; /* 微分系数 - 根据实际情况微调 */
+static float track_kp = 2.0f;   /* 外环(位置环) 比例系数 - 依新精度微调 */
+static float track_kd = 0.5f;   /* 外环(位置环) 微分系数 - 依新精度微调 */
 static float track_last_error = 0.0f;
+#define BASE_TARGET_SPEED 30.0f /* 基础目标速度（脉冲/10ms），可根据实际情况调节 */
 
 static void LineFollow_RunByRawIR(void)
 {
@@ -170,79 +171,65 @@ static void LineFollow_RunByRawIR(void)
     float p_out = 0.0f;
     float d_out = 0.0f;
     float total_adjust = 0.0f;
-    int16_t final_left = 300;
-    int16_t final_right = 300;
-    int16_t inner_speed = 0;
+    float speed_left = BASE_TARGET_SPEED;
+    float speed_right = BASE_TARGET_SPEED;
     uint8_t hit_count = 0;
 
     /* 
      * 传感器分布: [0]最左, [1]偏左, [2]中间, [3]偏右, [4]最右 
-     * 压线(黑)时为1。根据位置赋权重计算 error (小车偏向位置)
+     * 根据要求：五路循迹精度放到10
      */
-    if (g_ir_data.sensor[0]) { error -= 4.0f; hit_count++; }
-    if (g_ir_data.sensor[1]) { error -= 2.0f; hit_count++; }
-    if (g_ir_data.sensor[2]) { error += 0.0f; hit_count++; }
-    if (g_ir_data.sensor[3]) { error += 2.0f; hit_count++; }
-    if (g_ir_data.sensor[4]) { error += 4.0f; hit_count++; }
+    if (g_ir_data.sensor[0]) { error -= 10.0f; hit_count++; }
+    if (g_ir_data.sensor[1]) { error -= 5.0f;  hit_count++; }
+    if (g_ir_data.sensor[2]) { error += 0.0f;  hit_count++; }
+    if (g_ir_data.sensor[3]) { error += 5.0f;  hit_count++; }
+    if (g_ir_data.sensor[4]) { error += 10.0f; hit_count++; }
     
-    if (hit_count > 0)
-    {
+    if (hit_count > 0) {
         error = error / (float)hit_count; /* 计算平均误差中心 */
-    }
-    else
-    {
-        /* 完全丢失黑线时，使用最后一次记录的误差极性放大（用于锐角大弯找线） */
-        if (track_last_error < 0.0f) { error = -5.0f; }
-        else if (track_last_error > 0.0f) { error = 5.0f; }
+    } else {
+        /* 完全丢失黑线时，使用最后一次记录的误差极性放大 */
+        if (track_last_error < 0.0f) { error = -12.0f; }
+        else if (track_last_error > 0.0f) { error = 12.0f; }
         else { error = 0.0f; }
     }
 
-    /* PID 计算 */
+    /* 外环：位置 PID 计算 */
     p_out = track_kp * error;
     d_out = track_kd * (error - track_last_error);
     total_adjust = p_out + d_out;
     
     /* 
-     * 控制策略: 最大限速 300 (即 30%占空比)，坚决不让外侧车轮主动加速！！！
-     * 控制手段: 仅对内侧轮进行减速甚至反转以形成更大的差速转向。
+     * 控制手段: 串级PID分配目标速度（允许分配到负值反相）
+     * 策略：不加大外侧轮速度，只减小（或反向）内侧轮，以产生大差速转向。
      */
     if (total_adjust < 0.0f)
     {
-        /* error < 0 代表黑线偏左（车体偏右），需左转，内侧轮可反转以减小转弯半径 */
-        inner_speed = 300 - (int16_t)(-total_adjust);
-        if (inner_speed < -300) { inner_speed = -300; } /* 允许反向 */
-        final_left = inner_speed;
-        final_right = 300;
+        /* 偏左需左转：减小左侧内轮速度 */
+        speed_left = BASE_TARGET_SPEED + total_adjust; // total_adjust为负，相加即减速/反转
+        speed_right = BASE_TARGET_SPEED;
         g_line_debug_mode = "PID_L";
     }
     else if (total_adjust > 0.0f)
     {
-        /* error > 0 代表黑线偏右（车体偏左），需右转，内侧轮可反转以减小转弯半径 */
-        inner_speed = 300 - (int16_t)(total_adjust);
-        if (inner_speed < -300) { inner_speed = -300; } /* 允许反向 */
-        final_left = 300;
-        final_right = inner_speed;
+        /* 偏右需右转：减小右侧内轮速度 */
+        speed_left = BASE_TARGET_SPEED;
+        speed_right = BASE_TARGET_SPEED - total_adjust;
         g_line_debug_mode = "PID_R";
     }
     else
     {
-        /* 完美居中，均满速30% */
-        final_left = 300;
-        final_right = 300;
+        speed_left = BASE_TARGET_SPEED;
+        speed_right = BASE_TARGET_SPEED;
         g_line_debug_mode = "PID_C";
     }
     
-    /* 更新上一拍误差，用于下一次微分项计算 (需正常压线才记录有效位置) */
-    if (hit_count > 0)
-    {
-        track_last_error = error;
-    }
-    
-    g_line_debug_left_pwm = final_left;
-    g_line_debug_right_pwm = final_right;
+    /* 更新上一拍误差 */
+    if (hit_count > 0) track_last_error = error;
 
-    Motor_SetLeft(final_left);
-    Motor_SetRight(final_right);
+    /* 将计算出的分配速度送到内环（速度环）目标 */
+    g_pid_left.target = speed_left;
+    g_pid_right.target = speed_right;
 }
 /* ================================================================
 *                     ???????????? (??????)
@@ -473,23 +460,33 @@ USART_ReceiveData(USART1); /* 读数据寄存器清除ORE */
 */
 void TIM6_DAC_IRQHandler(void)
 {
-if (TIM_GetITStatus(TIM6, TIM_IT_Update) != RESET)
-{
-TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
-/* ===== 1. ????????????????????? ===== */
-g_encoder_left  = Encoder_Read_TIM2(); /* ???????????????????? TIM2->CNT */
-g_encoder_right = Encoder_Read_TIM3();
-/* ===== 2. ??????????? ===== */
-// IR_Read(&g_ir_data); // 已移至主循环，避免重复读取导致状态错乱
-/* ===== 3. ???MPU6050??????????? ===== */
-// MPU6050_ReadAll(&g_mpu_data); // 已移至主循环，避免重复读取和I2C/UART冲突
-MPU6050_UpdateYaw(&g_mpu_data, 0.01f);  /* dt = 10ms = 0.01s */
-/* ===== 4. 等待移植的PID速度闭环 ===== */
-/* 目前直接开环控制，速度闭环可以后续加入此处 */
-/* 发送事件标志给主循环 */
-g_flag_10ms = 1;
+    float pwm_left = 0.0f;
+    float pwm_right = 0.0f;
+
+    if (TIM_GetITStatus(TIM6, TIM_IT_Update) != RESET)
+    {
+        TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
+        
+        /* ===== 1. 获取编码器反馈值 ===== */
+        g_encoder_left  = Encoder_Read_TIM2(); 
+        g_encoder_right = Encoder_Read_TIM3();
+        
+        /* ===== 2. MPU6050 姿态结算 ===== */
+        MPU6050_UpdateYaw(&g_mpu_data, 0.01f);
+
+        /* ===== 4. 内环：PID速度闭环执行 ===== */
+        pwm_left = PID_Incremental(&g_pid_left, g_pid_left.target, (float)g_encoder_left);
+        pwm_right = PID_Incremental(&g_pid_right, g_pid_right.target, (float)g_encoder_right);
+        
+        /* 驱动电机输出PWM */
+        Motor_SetLeft((int16_t)pwm_left);
+        Motor_SetRight((int16_t)pwm_right);
+
+        /* 发送事件标志给主循环 */
+        g_flag_10ms = 1;
+    }
 }
-}
+
 /* ================================================================
 *                     ????????
 * ================================================================ */
@@ -552,11 +549,20 @@ delay_ms(1000);
 /* ?????????NVIC????????????? */
 NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 /* ????????????? */
-MX_TIM1_PWM_Init();           // ?????1 PWM (PA8~PA11)
-Motor_GPIO_Init();            // ???????/???????
-// MX_TIM2_Encoder_Init();    // (?????????PWM????????????)
-// MX_TIM3_Encoder_Init();
-MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
+MX_TIM1_PWM_Init();           // 定时器1 PWM (PA8~PA11)
+Motor_GPIO_Init();            // 电机引脚/接口
+
+    /* 闭环必须：使能编码器与定时器 */
+    MX_TIM2_Encoder_Init();
+    MX_TIM3_Encoder_Init();
+    MX_TIM6_Init();               // 核心计算定时器 (10ms)
+    
+    /* 速度环PID参数初始化 (Kp, Ki, Kd, OutMax, OutMin) */
+    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; PWM全量程给1000或500对应最大值 */
+    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 500.0f, -500.0f);
+    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 500.0f, -500.0f);
+
+    MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
 MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
 SYN6658_Init();               // ???????????
 OpenMV_Init();                // OpenMV 初始化
