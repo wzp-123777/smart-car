@@ -75,7 +75,7 @@ static const char *g_line_debug_mode = "INIT";
 #define LINE_FOLLOW_SEARCH_ADJUST      40.0f   // 放大转弯差速
 #define LINE_FOLLOW_GYRO_DAMP           0.05f
 #define LINE_FOLLOW_GYRO_DAMP_MAX       4.0f
-#define LINE_FOLLOW_MIN_INNER_SPEED    -25.0f  // 允许内轮反转
+#define LINE_FOLLOW_MIN_INNER_SPEED    -45.0f  // 允许内轮反转，增大反转幅度防抱死
 #define LINE_FOLLOW_GYRO_CAL_SAMPLES   12U
 #define LINE_FOLLOW_GYRO_CAL_DELAY_MS   5U
 /* ================================================================
@@ -587,12 +587,28 @@ void TIM6_DAC_IRQHandler(void)
 */
 static CarEvent_TypeDef DetectEvent(void)
 {
-/* 当前阶段只做循迹，不启用巡检点/视觉识别状态切换。 */
-if (OpenMV_HasNewData())
-{
-OpenMV_ClearNewFlag();
-}
-return EVENT_NONE;
+    static uint32_t last_speak_time = 0;
+    static uint8_t  last_object_id = 0;
+
+    if (OpenMV_HasNewData())
+    {
+        OpenMV_DataTypeDef result = OpenMV_GetResult();
+        OpenMV_ClearNewFlag();
+
+        if (result.is_valid && result.object_id != 0)
+        {
+            uint32_t current_time = HAL_GetTick();
+            
+            /* 如果是新物体，或者距离上次播报同一个物体已经超过3000ms，则播报 */
+            if ((result.object_id != last_object_id) || (current_time - last_speak_time > 3000))
+            {
+                SYN6658_ReportObject(result.object_id);
+                last_object_id = result.object_id;
+                last_speak_time = current_time;
+            }
+        }
+    }
+    return EVENT_NONE;
 }
 /* ================================================================
 *                     ????????
@@ -650,9 +666,9 @@ Motor_GPIO_Init();            // 电机引脚/接口
     MX_TIM6_Init();               // 核心计算定时器 (10ms)
     
     /* 速度环PID参数初始化 (Kp, Ki, Kd, OutMax, OutMin) */
-    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; PWM全量程给1000或500对应最大值 */
-    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 500.0f, -500.0f);
-    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 500.0f, -500.0f);
+    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭矩 */
+    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
+    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
 
     MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
 MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
@@ -663,6 +679,12 @@ MX_USART3_Init();             // MPU6050模块串口
 MPU6050_Init();               // 串口MPU数据接口
 Alert_Init();                 // 声光报警初始化
 StartButton_Init();           // 初始化PA15作为启动按键
+
+/* ====== 上电完成提示 ====== */
+SYN6658_Speak("\xC9\xCF\xB5\xE7\xCD\xEA\xB3\xC9"); // "上电完成"的GBK十六进制
+Alert_Beep();                 // 蜂鸣器短促滴一声
+/* ========================== */
+
 /* ????? */
 Motor_Stop();
 Motor_Enable(1);

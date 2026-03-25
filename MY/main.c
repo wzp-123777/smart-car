@@ -57,7 +57,6 @@ volatile float g_motor_right_pwm = 0;
 /* 10ms????? */
 volatile uint8_t g_flag_10ms = 0;
 
-static int16_t g_line_follow_last_dir = 0;
 static int16_t g_line_debug_left_pwm = 0;
 static int16_t g_line_debug_right_pwm = 0;
 static uint8_t g_line_debug_left_score = 0;
@@ -66,13 +65,19 @@ static const char *g_line_debug_mode = "INIT";
 
 #define LINE_DEBUG_INTERVAL_MS     150U
 #define LINE_FOLLOW_LOOP_DELAY_MS    5U
-#define LINE_FOLLOW_PWM_LIMIT      500
-#define LINE_FOLLOW_SPEED_RUN      200
-#define LINE_FOLLOW_SPEED_TURN     (-180)   /* 转弯修正时减速轮反相 */
-#define LINE_FOLLOW_SPEED_CURVE_OUTER 380
-#define LINE_FOLLOW_SPEED_EDGE_OUTER  500
-#define LINE_FOLLOW_SPEED_SEARCH   420
-#define LINE_FOLLOW_SPEED_WIDE     140
+#define LINE_FOLLOW_TARGET_STRAIGHT    35.0f   // 提速前为 20.0
+#define LINE_FOLLOW_TARGET_FINE        30.0f   // 提速前为 18.0
+#define LINE_FOLLOW_TARGET_STRONG      25.0f   // 提速前为 14.0
+#define LINE_FOLLOW_TARGET_LOST         0.0f
+#define LINE_FOLLOW_TARGET_SEARCH      20.0f   // 提速前为 12.0
+#define LINE_FOLLOW_FINE_ADJUST        14.0f   // 放大转弯差速
+#define LINE_FOLLOW_STRONG_ADJUST      25.0f   // 放大转弯差速
+#define LINE_FOLLOW_SEARCH_ADJUST      40.0f   // 放大转弯差速
+#define LINE_FOLLOW_GYRO_DAMP           0.05f
+#define LINE_FOLLOW_GYRO_DAMP_MAX       4.0f
+#define LINE_FOLLOW_MIN_INNER_SPEED    -45.0f  // 允许内轮反转，增大反转幅度防抱死
+#define LINE_FOLLOW_GYRO_CAL_SAMPLES   12U
+#define LINE_FOLLOW_GYRO_CAL_DELAY_MS   5U
 /* ================================================================
 *                     ?????????????????SysTick???????????????
 * ================================================================ */
@@ -122,7 +127,7 @@ last_debug_tick = now;
 
 snprintf(buf,
          sizeof(buf),
-         "IR bits=%u%u%u%u%u raw=0x%02X pos=%d aw=%u ab=%u ls=%u rs=%u lp=%d rp=%d mode=%s st=%s ev=%d\r\n",
+         "IR bits=%u%u%u%u%u raw=0x%02X pos=%d aw=%u ab=%u ls=%u rs=%u lp=%d rp=%d el=%d er=%d mode=%s st=%s ev=%d\r\n",
          g_ir_data.sensor[0],
          g_ir_data.sensor[1],
          g_ir_data.sensor[2],
@@ -136,6 +141,8 @@ snprintf(buf,
          g_line_debug_right_score,
          g_line_debug_left_pwm,
          g_line_debug_right_pwm,
+         g_encoder_left,
+         g_encoder_right,
          g_line_debug_mode,
          SM_GetStateName(g_state_machine.current_state),
          (int)event);
@@ -147,89 +154,157 @@ static void Debug_LogText(const char *text)
 Debug_USART_SendString(USART3, text);
 }
 
-static int16_t LineFollow_ClampPWM(int16_t pwm)
+static float g_mpu_gyro_z_bias = 0.0f;
+
+static float LineFollow_AbsFloat(float value)
 {
-if (pwm < (-LINE_FOLLOW_PWM_LIMIT))
-{
-return -LINE_FOLLOW_PWM_LIMIT;
-}
-if (pwm > LINE_FOLLOW_PWM_LIMIT)
-{
-return LINE_FOLLOW_PWM_LIMIT;
-}
-return pwm;
+    if (value < 0.0f)
+    {
+        return -value;
+    }
+    return value;
 }
 
-static float track_kp = 2.0f;   /* 外环(位置环) 比例系数 - 依新精度微调 */
-static float track_kd = 0.5f;   /* 外环(位置环) 微分系数 - 依新精度微调 */
-static float track_last_error = 0.0f;
-#define BASE_TARGET_SPEED 30.0f /* 基础目标速度（脉冲/10ms），可根据实际情况调节 */
+static float LineFollow_ClampFloat(float value, float min_value, float max_value)
+{
+    if (value < min_value)
+    {
+        return min_value;
+    }
+    if (value > max_value)
+    {
+        return max_value;
+    }
+    return value;
+}
+
+static void LineFollow_CalibrateGyroBias(void)
+{
+    MPU6050_DataTypeDef sample;
+    float gyro_sum = 0.0f;
+    uint8_t i;
+
+    for (i = 0; i < LINE_FOLLOW_GYRO_CAL_SAMPLES; i++)
+    {
+        MPU6050_ReadAll(&sample);
+        gyro_sum += sample.gyro_z_dps;
+        delay_ms(LINE_FOLLOW_GYRO_CAL_DELAY_MS);
+    }
+
+    g_mpu_gyro_z_bias = gyro_sum / (float)LINE_FOLLOW_GYRO_CAL_SAMPLES;
+}
 
 static void LineFollow_RunByRawIR(void)
 {
-    float error = 0.0f;
-    float p_out = 0.0f;
-    float d_out = 0.0f;
-    float total_adjust = 0.0f;
-    float speed_left = BASE_TARGET_SPEED;
-    float speed_right = BASE_TARGET_SPEED;
-    uint8_t hit_count = 0;
+    float base_speed = LINE_FOLLOW_TARGET_STRAIGHT;
+    float steer_strength = 0.0f;
+    float gyro_damp = 0.0f;
+    float gyro_rate = g_mpu_data.gyro_z_dps - g_mpu_gyro_z_bias;
+    float speed_left = LINE_FOLLOW_TARGET_STRAIGHT;
+    float speed_right = LINE_FOLLOW_TARGET_STRAIGHT;
+    uint8_t left_edge_on = g_ir_data.sensor[0];
+    uint8_t left_near_on = g_ir_data.sensor[1];
+    uint8_t center_on = g_ir_data.sensor[2];
+    uint8_t right_near_on = g_ir_data.sensor[3];
+    uint8_t right_edge_on = g_ir_data.sensor[4];
+    uint8_t left_score = (left_edge_on ? 2U : 0U) + (left_near_on ? 1U : 0U);
+    uint8_t right_score = (right_edge_on ? 2U : 0U) + (right_near_on ? 1U : 0U);
+    int8_t turn_dir = 0;
 
-    /* 
-     * 传感器分布: [0]最左, [1]偏左, [2]中间, [3]偏右, [4]最右 
-     * 根据要求：五路循迹精度放到10
-     */
-    if (g_ir_data.sensor[0]) { error -= 10.0f; hit_count++; }
-    if (g_ir_data.sensor[1]) { error -= 5.0f;  hit_count++; }
-    if (g_ir_data.sensor[2]) { error += 0.0f;  hit_count++; }
-    if (g_ir_data.sensor[3]) { error += 5.0f;  hit_count++; }
-    if (g_ir_data.sensor[4]) { error += 10.0f; hit_count++; }
-    
-    if (hit_count > 0) {
-        error = error / (float)hit_count; /* 计算平均误差中心 */
-    } else {
-        /* 完全丢失黑线时，使用最后一次记录的误差极性放大 */
-        if (track_last_error < 0.0f) { error = -12.0f; }
-        else if (track_last_error > 0.0f) { error = 12.0f; }
-        else { error = 0.0f; }
-    }
+    g_line_debug_left_score = left_score;
+    g_line_debug_right_score = right_score;
 
-    /* 外环：位置 PID 计算 */
-    p_out = track_kp * error;
-    d_out = track_kd * (error - track_last_error);
-    total_adjust = p_out + d_out;
-    
-    /* 
-     * 控制手段: 串级PID分配目标速度（允许分配到负值反相）
-     * 策略：不加大外侧轮速度，只减小（或反向）内侧轮，以产生大差速转向。
-     */
-    if (total_adjust < 0.0f)
+    if (g_ir_data.all_white != 0U)
     {
-        /* 偏左需左转：减小左侧内轮速度 */
-        speed_left = BASE_TARGET_SPEED + total_adjust; // total_adjust为负，相加即减速/反转
-        speed_right = BASE_TARGET_SPEED;
-        g_line_debug_mode = "PID_L";
+        base_speed = LINE_FOLLOW_TARGET_LOST;
+        steer_strength = 0.0f;
+        g_line_debug_mode = "LOST_0";
     }
-    else if (total_adjust > 0.0f)
+    else if (left_score > right_score)
     {
-        /* 偏右需右转：减小右侧内轮速度 */
-        speed_left = BASE_TARGET_SPEED;
-        speed_right = BASE_TARGET_SPEED - total_adjust;
-        g_line_debug_mode = "PID_R";
+        turn_dir = -1;
+
+        if (left_edge_on != 0U)
+        {
+            base_speed = center_on ? LINE_FOLLOW_TARGET_STRONG : LINE_FOLLOW_TARGET_SEARCH;
+            steer_strength = center_on ? LINE_FOLLOW_STRONG_ADJUST : LINE_FOLLOW_SEARCH_ADJUST;
+            g_line_debug_mode = center_on ? "EDGE_L" : "HARD_L";
+        }
+        else
+        {
+            base_speed = LINE_FOLLOW_TARGET_FINE;
+            steer_strength = LINE_FOLLOW_FINE_ADJUST;
+            g_line_debug_mode = "FINE_L";
+        }
+    }
+    else if (right_score > left_score)
+    {
+        turn_dir = 1;
+
+        if (right_edge_on != 0U)
+        {
+            base_speed = center_on ? LINE_FOLLOW_TARGET_STRONG : LINE_FOLLOW_TARGET_SEARCH;
+            steer_strength = center_on ? LINE_FOLLOW_STRONG_ADJUST : LINE_FOLLOW_SEARCH_ADJUST;
+            g_line_debug_mode = center_on ? "EDGE_R" : "HARD_R";
+        }
+        else
+        {
+            base_speed = LINE_FOLLOW_TARGET_FINE;
+            steer_strength = LINE_FOLLOW_FINE_ADJUST;
+            g_line_debug_mode = "FINE_R";
+        }
     }
     else
     {
-        speed_left = BASE_TARGET_SPEED;
-        speed_right = BASE_TARGET_SPEED;
-        g_line_debug_mode = "PID_C";
+        if ((center_on != 0U) || (g_ir_data.all_black != 0U))
+        {
+            base_speed = LINE_FOLLOW_TARGET_STRAIGHT;
+            g_line_debug_mode = (g_ir_data.all_black != 0U) ? "BLACK" : "CENTER";
+        }
+        else
+        {
+            base_speed = LINE_FOLLOW_TARGET_FINE;
+            g_line_debug_mode = "BAL";
+        }
     }
-    
-    /* 更新上一拍误差 */
-    if (hit_count > 0) track_last_error = error;
 
-    /* 将计算出的分配速度送到内环（速度环）目标 */
+    if (steer_strength > 0.0f)
+    {
+        gyro_damp = LineFollow_AbsFloat(gyro_rate) * LINE_FOLLOW_GYRO_DAMP;
+        gyro_damp = LineFollow_ClampFloat(gyro_damp, 0.0f, LINE_FOLLOW_GYRO_DAMP_MAX);
+
+        if ((left_edge_on != 0U) || (right_edge_on != 0U))
+        {
+            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 2.0f, LINE_FOLLOW_SEARCH_ADJUST);
+        }
+        else
+        {
+            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 0.8f, LINE_FOLLOW_FINE_ADJUST);
+        }
+    }
+
+    speed_left = base_speed;
+    speed_right = base_speed;
+
+    if (turn_dir < 0)
+    {
+        /* 当前实车方向：左侧红外命中时，由右侧作为内轮减速修正。 */
+        speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
+                                            LINE_FOLLOW_MIN_INNER_SPEED,
+                                            LINE_FOLLOW_TARGET_STRAIGHT);
+    }
+    else if (turn_dir > 0)
+    {
+        /* 当前实车方向：右侧红外命中时，由左侧作为内轮减速修正。 */
+        speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
+                                           LINE_FOLLOW_MIN_INNER_SPEED,
+                                           LINE_FOLLOW_TARGET_STRAIGHT);
+    }
+
     g_pid_left.target = speed_left;
     g_pid_right.target = speed_right;
+    g_line_debug_left_pwm = (int16_t)speed_left;
+    g_line_debug_right_pwm = (int16_t)speed_right;
 }
 /* ================================================================
 *                     ???????????? (??????)
@@ -475,8 +550,25 @@ void TIM6_DAC_IRQHandler(void)
         MPU6050_UpdateYaw(&g_mpu_data, 0.01f);
 
         /* ===== 4. 内环：PID速度闭环执行 ===== */
-        pwm_left = PID_Incremental(&g_pid_left, g_pid_left.target, (float)g_encoder_left);
-        pwm_right = PID_Incremental(&g_pid_right, g_pid_right.target, (float)g_encoder_right);
+        if (g_pid_left.target == 0.0f)
+        {
+            PID_Reset(&g_pid_left);
+            pwm_left = 0.0f;
+        }
+        else
+        {
+            pwm_left = PID_Incremental(&g_pid_left, g_pid_left.target, (float)g_encoder_left);
+        }
+
+        if (g_pid_right.target == 0.0f)
+        {
+            PID_Reset(&g_pid_right);
+            pwm_right = 0.0f;
+        }
+        else
+        {
+            pwm_right = PID_Incremental(&g_pid_right, g_pid_right.target, (float)g_encoder_right);
+        }
         
         /* 驱动电机输出PWM */
         Motor_SetLeft((int16_t)pwm_left);
@@ -495,12 +587,28 @@ void TIM6_DAC_IRQHandler(void)
 */
 static CarEvent_TypeDef DetectEvent(void)
 {
-/* 当前阶段只做循迹，不启用巡检点/视觉识别状态切换。 */
-if (OpenMV_HasNewData())
-{
-OpenMV_ClearNewFlag();
-}
-return EVENT_NONE;
+    static uint32_t last_speak_time = 0;
+    static uint8_t  last_object_id = 0;
+
+    if (OpenMV_HasNewData())
+    {
+        OpenMV_DataTypeDef result = OpenMV_GetResult();
+        OpenMV_ClearNewFlag();
+
+        if (result.is_valid && result.object_id != 0)
+        {
+            uint32_t current_time = HAL_GetTick();
+            
+            /* 如果是新物体，或者距离上次播报同一个物体已经超过3000ms，则播报 */
+            if ((result.object_id != last_object_id) || (current_time - last_speak_time > 3000))
+            {
+                SYN6658_ReportObject(result.object_id);
+                last_object_id = result.object_id;
+                last_speak_time = current_time;
+            }
+        }
+    }
+    return EVENT_NONE;
 }
 /* ================================================================
 *                     ????????
@@ -558,9 +666,9 @@ Motor_GPIO_Init();            // 电机引脚/接口
     MX_TIM6_Init();               // 核心计算定时器 (10ms)
     
     /* 速度环PID参数初始化 (Kp, Ki, Kd, OutMax, OutMin) */
-    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; PWM全量程给1000或500对应最大值 */
-    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 500.0f, -500.0f);
-    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 500.0f, -500.0f);
+    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭矩 */
+    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
+    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
 
     MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
 MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
@@ -568,8 +676,15 @@ SYN6658_Init();               // ???????????
 OpenMV_Init();                // OpenMV 初始化
 IR_Init();                    // 5路红外模块
 MX_USART3_Init();             // MPU6050模块串口
+MPU6050_Init();               // 串口MPU数据接口
 Alert_Init();                 // 声光报警初始化
 StartButton_Init();           // 初始化PA15作为启动按键
+
+/* ====== 上电完成提示 ====== */
+SYN6658_Speak("\xC9\xCF\xB5\xE7\xCD\xEA\xB3\xC9"); // "上电完成"的GBK十六进制
+Alert_Beep();                 // 蜂鸣器短促滴一声
+/* ========================== */
+
 /* ????? */
 Motor_Stop();
 Motor_Enable(1);
@@ -583,24 +698,14 @@ Debug_LogText("DBG USART3 ready\r\n");
 while (StartButton_IsPressed() == 0)
 {
 IR_Read(&g_ir_data);
+MPU6050_ReadAll(&g_mpu_data);
 Debug_LogIR(EVENT_NONE);
 delay_ms(10);
 }
 
+MPU6050_ResetYaw(&g_mpu_data);
+LineFollow_CalibrateGyroBias();
 IR_ResetTracking();
-IR_Read(&g_ir_data);
-if (g_ir_data.position < 0)
-{
-g_line_follow_last_dir = -1;
-}
-else if (g_ir_data.position > 0)
-{
-g_line_follow_last_dir = 1;
-}
-else
-{
-g_line_follow_last_dir = 0;
-}
 /* ??????????3???????????????? */
 SYN6658_Speak("??????");
 delay_ms(2000); // ?????????????????????
