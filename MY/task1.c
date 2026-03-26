@@ -1,4 +1,5 @@
 #include "task.h"
+#include "state_machine.h"
 
 #include "encoder.h"
 #include "motor.h"
@@ -121,7 +122,7 @@ void Task1_Run(void)
             {
                 SYN6658_Speak("\xBB\xD8\xB5\xBD\x41\xB5\xE3"); // 回到A点停车
                 Blink_LED_PC13();
-                Motor_SetSpeed(0, 0); 
+                Motor_Stop(); 
                 m_stage = M_STAGE_FINISH;
             }
         }

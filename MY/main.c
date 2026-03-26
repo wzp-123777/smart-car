@@ -110,7 +110,7 @@ str++;
 }
 }
 
-static void Debug_LogIR(CarEvent_TypeDef event)
+void Debug_LogIR(CarEvent_TypeDef event)
 {
 char buf[168];
 static uint32_t last_debug_tick = 0;
@@ -583,7 +583,7 @@ void TIM6_DAC_IRQHandler(void)
 /**
 * @brief  ???????????????????
 */
-static CarEvent_TypeDef DetectEvent(void)
+CarEvent_TypeDef DetectEvent(void)
 {
     static uint32_t last_speak_time = 0;
     static uint8_t  last_object_id = 0;
