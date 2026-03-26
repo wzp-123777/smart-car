@@ -90,4 +90,10 @@ void SYN6658_ReportStartup(void);
  */
 void SYN6658_ReportCollision(void);
 
+/**
+ * @brief  播报到达A/B/C/D点
+ * @param  point: 'A', 'B', 'C', 'D'
+ */
+void SYN6658_ReportStation(char point);
+
 #endif /* __SYN6658_H */

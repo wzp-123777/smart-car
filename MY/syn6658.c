@@ -123,3 +123,15 @@ void SYN6658_ReportCollision(void)
 {
     SYN6658_Speak(TTS_COLLISION);
 }
+
+void SYN6658_ReportStation(char point)
+{
+    char buf[8];
+    if (point >= 'A' && point <= 'D') {
+        buf[0] = point;
+        buf[1] = 0xB5;
+        buf[2] = 0xE3;
+        buf[3] = 0x00;
+        SYN6658_Speak(buf);
+    }
+}

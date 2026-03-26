@@ -1,8 +1,8 @@
 /**
  * @file    state_machine.c
  * @brief   小车状态机实现
- * @note    核心逻辑：根据当前状态+事件决定下一步动作
- *          比赛时主要修改 SM_Process 中的状态转换条件
+ * @note    当前主工程并未把本状态机作为唯一运行入口。
+ *          OpenMV 现为常在线主动上报模式，因此这里不再发送视觉触发命令。
  */
 
 #include "state_machine.h"
@@ -23,13 +23,13 @@ extern void delay_ms(__IO uint32_t nTime);
  */
 void SM_Init(StateMachine_TypeDef *sm, uint8_t total_points)
 {
-    sm->current_state    = STATE_IDLE;
-    sm->last_state       = STATE_IDLE;
-    sm->checkpoint_count = 0;
+    sm->current_state     = STATE_IDLE;
+    sm->last_state        = STATE_IDLE;
+    sm->checkpoint_count  = 0;
     sm->total_checkpoints = total_points;
-    sm->state_enter_tick = HAL_GetTick();
-    sm->timeout_ms       = 0;
-    sm->detected_obj_id  = 0;
+    sm->state_enter_tick  = HAL_GetTick();
+    sm->timeout_ms        = 0;
+    sm->detected_obj_id   = 0;
 }
 
 /**
@@ -41,27 +41,26 @@ void SM_TransitionTo(StateMachine_TypeDef *sm, CarState_TypeDef new_state)
     sm->current_state    = new_state;
     sm->state_enter_tick = HAL_GetTick();
 
-    /* 根据不同状态设置超时时间 */
     switch (new_state)
     {
     case STATE_STOP_AND_DETECT:
-        sm->timeout_ms = 500;   /* 停车稳定500ms */
+        sm->timeout_ms = 500;
         break;
     case STATE_VISION_DETECT:
-        sm->timeout_ms = 3000;  /* 视觉识别最多等3秒 */
+        sm->timeout_ms = 3000;
         break;
     case STATE_VOICE_REPORT:
-        sm->timeout_ms = 4000;  /* 语音播报最多4秒 */
+        sm->timeout_ms = 4000;
         break;
     case STATE_TURN_LEFT:
     case STATE_TURN_RIGHT:
-        sm->timeout_ms = 2000;  /* 转弯最多2秒 */
+        sm->timeout_ms = 2000;
         break;
     case STATE_U_TURN:
-        sm->timeout_ms = 4000;  /* 掉头最多4秒 */
+        sm->timeout_ms = 4000;
         break;
     default:
-        sm->timeout_ms = 0;     /* 无超时 */
+        sm->timeout_ms = 0;
         break;
     }
 }
@@ -71,28 +70,23 @@ void SM_TransitionTo(StateMachine_TypeDef *sm, CarState_TypeDef new_state)
  */
 uint8_t SM_IsTimeout(StateMachine_TypeDef *sm)
 {
-    if (sm->timeout_ms == 0) return 0;
+    if (sm->timeout_ms == 0)
+    {
+        return 0;
+    }
     return (HAL_GetTick() - sm->state_enter_tick >= sm->timeout_ms) ? 1 : 0;
 }
 
 /**
  * @brief  状态机核心处理函数
- * @note   在 main.c 的 while(1) 中以 ~10ms 周期调用
- * 
- * 【比赛时修改要点】
- *  1. STATE_STOP_AND_DETECT: 修改停车条件（几路传感器全黑=到达标记）
- *  2. STATE_VISION_DETECT: 修改识别完成后的动作
- *  3. 添加/修改转弯逻辑
+ * @note   当前文件保留为扩展框架，不是 main.c 唯一执行主线。
  */
 void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
 {
     switch (sm->current_state)
     {
-    /* ==================== 空闲状态 ==================== */
     case STATE_IDLE:
-        /* 电机停止，等待启动信号 */
         Motor_Stop();
-
         if (event == EVENT_START)
         {
             sm->checkpoint_count = 0;
@@ -100,89 +94,64 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
         }
         break;
 
-    /* ==================== 巡线模式 ==================== */
     case STATE_LINE_FOLLOW:
-        /*
-         * 巡线控制在定时器中断中执行（10ms周期）
-         * 这里只处理状态切换事件
-         */
         if (event == EVENT_CROSS_DETECTED)
         {
-            /* 检测到十字路口/标记线 -> 累加检查点，不停车，发送视觉请求 */
             sm->checkpoint_count++;
             Alert_Checkpoint(100);
-            
-            /* 异步发送识别指令给OpenMV，继续巡线 */
-            OpenMV_SendCmd(OPENMV_CMD_DETECT);
-            OpenMV_ClearNewFlag();
-            // 不阻塞，不改变状态
+            /* OpenMV 常在线主动上报，这里不再发送触发命令。 */
         }
         else if (event == EVENT_REACHED_END)
         {
-            /* 到达终点 */
             Motor_Stop();
             SM_TransitionTo(sm, STATE_FINISHED);
         }
 
-        /* 异步处理OpenMV返回的数据 */
         if (g_openmv_data.is_new)
         {
             OpenMV_DataTypeDef result = OpenMV_GetResult();
             sm->detected_obj_id = result.object_id;
             OpenMV_ClearNewFlag();
-
-            /* 异步语音播报 */
             SYN6658_ReportPoint(sm->checkpoint_count);
-            // 不使用delay阻塞主循环，直接先后发送或者由硬件FIFO缓冲
             SYN6658_ReportObject(sm->detected_obj_id);
         }
         break;
 
-    /* ==================== 左转 ==================== */
     case STATE_TURN_LEFT:
-        Motor_SetLeft(-300);   /* 左轮反转 */
-        Motor_SetRight(300);   /* 右轮正转 */
-
+        Motor_SetLeft(-300);
+        Motor_SetRight(300);
         if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
         {
             SM_TransitionTo(sm, STATE_LINE_FOLLOW);
         }
         break;
 
-    /* ==================== 右转 ==================== */
     case STATE_TURN_RIGHT:
         Motor_SetLeft(300);
         Motor_SetRight(-300);
-
         if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
         {
             SM_TransitionTo(sm, STATE_LINE_FOLLOW);
         }
         break;
 
-    /* ==================== 掉头 ==================== */
     case STATE_U_TURN:
         Motor_SetLeft(-400);
         Motor_SetRight(400);
-
         if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
         {
             SM_TransitionTo(sm, STATE_LINE_FOLLOW);
         }
         break;
 
-    /* ==================== 任务完成 ==================== */
     case STATE_FINISHED:
         Motor_Stop();
-        /* 完成提示：三声短促蜂鸣 + LED闪烁 */
         Alert_Error(3);
-        Alert_LED_On();  /* 常亮表示已完成 */
+        Alert_LED_On();
         break;
 
-    /* ==================== 错误状态 ==================== */
     case STATE_ERROR:
         Motor_Stop();
-        /* 错误报警：快速闪烁5次 */
         Alert_Error(5);
         break;
 

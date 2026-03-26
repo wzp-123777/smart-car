@@ -69,7 +69,7 @@ void Task1_Run(void)
     int32_t total_distance = 0; // 用编码器累加表示距离
     
     // 起点A播报
-    SYN6658_Speak("\xC6\xF0\xB5\xE3\x41\xB5\xE3"); // "起点A点"
+    SYN6658_ReportStation('A'); // "起点A点"
     Blink_LED_PC13();
     
     MPU6050_DataTypeDef last_mpu;
@@ -89,7 +89,7 @@ void Task1_Run(void)
         /* 外层任务1逻辑监控 */
         if (m_stage == M_STAGE_A_TO_B && total_distance > 2591) // 编码器达到2591对应到达B
         {
-            SYN6658_Speak("\xB5\xBD\xB4\xEF\x42\xB5\xE3"); // 到达B点
+            SYN6658_ReportStation('B'); // 到达B点
             Blink_LED_PC13();
             m_stage = M_STAGE_B_TURN;
             total_distance = 0;
@@ -100,7 +100,7 @@ void Task1_Run(void)
             // B -> C 是弯道，检测偏航角是否达到180度
             if (g_mpu_data.yaw >= 180.0f || g_mpu_data.yaw <= -180.0f)
             {
-                SYN6658_Speak("\xB5\xBD\xB4\xEF\x43\xB5\xE3"); // 到达C点
+                SYN6658_ReportStation('C'); // 到达C点
                 Blink_LED_PC13();
                 m_stage = M_STAGE_C_TO_D;
                 total_distance = 0;
@@ -109,7 +109,7 @@ void Task1_Run(void)
         }
         else if (m_stage == M_STAGE_C_TO_D && total_distance > 2591) 
         {
-            SYN6658_Speak("\xB5\xBD\xB4\xEF\x44\xB5\xE3"); // 到达D点
+            SYN6658_ReportStation('D'); // 到达D点
             Blink_LED_PC13();
             m_stage = M_STAGE_D_TURN;
             total_distance = 0;
@@ -120,7 +120,7 @@ void Task1_Run(void)
             // D -> A 是弯道，检测偏航角是否达到180度
             if (g_mpu_data.yaw >= 180.0f || g_mpu_data.yaw <= -180.0f)
             {
-                SYN6658_Speak("\xBB\xD8\xB5\xBD\x41\xB5\xE3"); // 回到A点停车
+                SYN6658_ReportStation('A'); // 回到A点停车
                 Blink_LED_PC13();
                 Motor_Stop(); 
                 m_stage = M_STAGE_FINISH;

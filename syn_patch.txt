@@ -1,0 +1,15 @@
+
+void SYN6658_ReportStation(char point)
+{
+    char buf[64];
+    // 发音格式: X点 
+    // 这里使用拼音拼接，或者直接使用 GBK 编码进行传递
+    if (point == `A` || point == `B` || point == `C` || point == `D`) {
+        buf[0] = point;
+        buf[1] = 0xB5; // GBK 点 的高位
+        buf[2] = 0xE3; // GBK 点 的低位
+        buf[3] = 0x00;
+        SYN6658_Speak(buf);
+    }
+}
+

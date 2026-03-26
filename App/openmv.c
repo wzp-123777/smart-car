@@ -1,27 +1,8 @@
 /**
  * @file    openmv.c
  * @brief   STM32 与 OpenMV 串口通信实现
- * @note    接收使用逐字节中断+状态机解析，发送使用阻塞式
- * 
- * 【OpenMV端配套代码】（需要在OpenMV IDE中烧写）
- * 
- *   import sensor, image, time, struct
- *   from pyb import UART
- *   
- *   uart = UART(3, 115200)  # OpenMV的UART3对应P4(TX)/P5(RX)
- *   
- *   while True:
- *       if uart.any():
- *           data = uart.read(3)  # 读取3字节指令
- *           if data and data[0] == 0xAA and data[2] == 0x55:
- *               cmd = data[1]
- *               if cmd == 0x01:  # 检测指令
- *                   img = sensor.snapshot()
- *                   # ... 你的识别算法 ...
- *                   obj_id = 0x01  # 识别结果
- *                   cx, cy = 160, 120  # 中心坐标
- *                   checksum = (obj_id + (cx>>8) + (cx&0xFF) + (cy>>8) + (cy&0xFF)) & 0xFF
- *                   uart.write(struct.pack('<BBBBBBBB', 0xBB, obj_id, cx>>8, cx&0xFF, cy>>8, cy&0xFF, checksum, 0x55))
+ * @note    OpenMV 当前常在线主动上报，STM32 侧只保留接收解析逻辑。
+ *          OpenMV_SendCmd() 保留为空实现，兼容历史调用点。
  */
 
 #include "openmv.h"
@@ -47,35 +28,20 @@ void OpenMV_Init(void)
     g_openmv_data.is_new = 0;
 }
 
-static void USART_SendBytes(USART_TypeDef* USARTx, uint8_t *data, uint16_t len)
-{
-    for(uint16_t i = 0; i < len; i++) {
-        while(USART_GetFlagStatus(USARTx, USART_FLAG_TXE) == RESET);
-        USART_SendData(USARTx, data[i]);
-    }
-}
-
 /**
- * @brief  向OpenMV发送指令
- * @note   协议: [0xAA] [CMD] [校验和] [0x55]
+ * @brief  兼容旧接口的空函数
+ * @note   当前 OpenMV 常在线主动上报，本函数不再发送任何数据。
  */
 void OpenMV_SendCmd(uint8_t cmd)
 {
-    uint8_t tx_buf[4];
-
-    tx_buf[0] = OPENMV_CMD_HEADER;  /* 帧头 0xAA */
-    tx_buf[1] = cmd;                 /* 命令字节 */
-    tx_buf[2] = cmd;                 /* 校验和（简单起见=命令本身） */
-    tx_buf[3] = OPENMV_CMD_TAIL;    /* 帧尾 0x55 */
-
-    USART_SendBytes(USART1, tx_buf, 4);
+    (void)cmd;
 }
 
 /**
  * @brief  逐字节解析OpenMV返回的数据（状态机方式）
  * @note   协议: [0xBB] [ID] [Xh] [Xl] [Yh] [Yl] [校验] [0x55]
  *         在串口接收回调函数中逐字节调用
- * 
+ *
  * 状态机流程:
  *   状态0: 等待帧头 0xBB
  *   状态1: 接收数据 (6字节: ID + Xh + Xl + Yh + Yl + 校验)
@@ -104,16 +70,15 @@ void OpenMV_ParseByte(uint8_t byte)
     case 2:  /* 等待帧尾 */
         if (byte == OPENMV_RX_TAIL)
         {
-            /* 计算校验和 */
             uint8_t checksum = 0;
             uint8_t i;
+
             for (i = 0; i < 5; i++)  /* 对前5个字节求和 */
             {
                 checksum += s_rx_temp[i];
             }
             checksum &= 0xFF;
 
-            /* 校验通过，更新数据 */
             if (checksum == s_rx_temp[5])
             {
                 g_openmv_data.object_id = s_rx_temp[0];
@@ -123,7 +88,7 @@ void OpenMV_ParseByte(uint8_t byte)
                 g_openmv_data.is_new = 1;
             }
         }
-        /* 无论帧尾是否正确，都回到状态0 */
+
         s_rx_state = 0;
         s_rx_cnt = 0;
         break;
@@ -176,4 +141,3 @@ void OpenMV_ClearNewFlag(void)
     g_openmv_data.is_new = 0;
     __enable_irq();
 }
-

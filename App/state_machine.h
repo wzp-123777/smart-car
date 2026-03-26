@@ -1,19 +1,8 @@
 /**
  * @file    state_machine.h
  * @brief   小车状态机框架
- * @note    定义所有运行状态及状态切换逻辑
- * 
- * 状态流转图：
- * 
- *   [IDLE] --按下启动键--> [LINE_FOLLOW] --检测到标记--> [STOP_AND_DETECT]
- *                                                          |
- *                             [LINE_FOLLOW] <--识别完成-- [VISION_DETECT]
- *                                                          |
- *                                                    [VOICE_REPORT]
- *                                                          |
- *                              [LINE_FOLLOW] <--播报完成--+
- *                                    |
- *                              到达终点 --> [FINISHED]
+ * @note    定义状态机框架与扩展状态。
+ *          当前主工程主要由 main.c + task1.c 调度，本状态机保留给后续任务扩展。
  */
 #ifndef __STATE_MACHINE_H
 #define __STATE_MACHINE_H
@@ -24,9 +13,9 @@
 typedef enum {
     STATE_IDLE = 0,         /* 空闲/等待启动 */
     STATE_LINE_FOLLOW,      /* 巡线模式（正常行驶） */
-    STATE_STOP_AND_DETECT,  /* 停车检测模式（到达巡检点，停下来） */
-    STATE_VISION_DETECT,    /* 视觉识别模式（OpenMV正在识别） */
-    STATE_VOICE_REPORT,     /* 语音播报模式（SYN6658正在播报） */
+    STATE_STOP_AND_DETECT,  /* 预留状态：停车检测 */
+    STATE_VISION_DETECT,    /* 预留状态：视觉识别 */
+    STATE_VOICE_REPORT,     /* 预留状态：语音播报 */
     STATE_TURN_LEFT,        /* 左转弯 */
     STATE_TURN_RIGHT,       /* 右转弯 */
     STATE_U_TURN,           /* 掉头 */

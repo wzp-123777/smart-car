@@ -1,13 +1,13 @@
 /**
  * @file    openmv.h
  * @brief   STM32 与 OpenMV H7 Plus 串口通信模块
- * @note    当前仓库的 OpenMV/main.py 采用主动识别、主动上报模式。
- *          本文件仍保留命令帧定义，便于后续切回按需触发。
+ * @note    当前仓库的 OpenMV/main.py 采用常在线、主动识别、主动上报模式。
+ *          STM32 侧只负责通过 UART1 接收识别结果，不再发送触发命令。
+ *          OpenMV_SendCmd() 仅保留为空实现，兼容旧代码调用。
  *
  *          通信协议：
- *          STM32 发送: [帧头0xAA] [命令字节] [校验和] [帧尾0x55]
  *          OpenMV返回: [帧头0xBB] [物体ID] [X坐标高] [X坐标低] [Y坐标高] [Y坐标低] [校验和] [帧尾0x55]
- * 
+ *
  *          使用 UART1 通信，波特率 115200
  *          引脚: PB6(TX) / PB7(RX)，避免与TIM1(PA8~PA11)冲突
  */
@@ -18,15 +18,6 @@
 #include <string.h>
 
 /* ==================== 通信协议定义 ==================== */
-
-/* STM32发送给OpenMV的指令 */
-#define OPENMV_CMD_HEADER       0xAA    /* 帧头 */
-#define OPENMV_CMD_TAIL         0x55    /* 帧尾 */
-#define OPENMV_CMD_DETECT       0x01    /* 识别指令：开始检测 */
-#define OPENMV_CMD_STOP         0x02    /* 停止检测 */
-#define OPENMV_CMD_COLOR        0x03    /* 颜色识别模式 */
-#define OPENMV_CMD_SHAPE        0x04    /* 形状识别模式 */
-#define OPENMV_CMD_QRCODE       0x05    /* 二维码识别模式 */
 
 /* OpenMV返回给STM32的数据 */
 #define OPENMV_RX_HEADER        0xBB    /* 返回帧头 */
@@ -66,8 +57,9 @@ extern uint8_t g_openmv_rx_index;
 void OpenMV_Init(void);
 
 /**
- * @brief  向OpenMV发送识别指令
- * @param  cmd: 命令字节（如 OPENMV_CMD_DETECT）
+ * @brief  兼容旧接口的空函数
+ * @note   当前 OpenMV 常在线主动上报，本函数不再发送任何数据。
+ * @param  cmd: 保留参数，无实际作用
  */
 void OpenMV_SendCmd(uint8_t cmd);
 
