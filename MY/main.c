@@ -176,7 +176,7 @@ static float LineFollow_ClampFloat(float value, float min_value, float max_value
     return value;
 }
 
-static void LineFollow_CalibrateGyroBias(void)
+void LineFollow_CalibrateGyroBias(void)
 {
     MPU6050_DataTypeDef sample;
     float gyro_sum = 0.0f;
