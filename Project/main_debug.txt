@@ -1,0 +1,320 @@
+1: RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+2: // ??????F1????????JTAG??F4????????????????????????????????????????
+3: // ??????????????????????????????????????????????????????
+4: GPIO_InitStructure.GPIO_Pin = GPIO_Pin_15;
+5: GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
+6: GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+7: GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+8: GPIO_Init(GPIOA, &GPIO_InitStructure);
+9: }
+10: /**
+11: * @brief  ??????? (??????????)
+12: */
+13: static uint8_t StartButton_IsPressed(void)
+14: {
+15: if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == Bit_RESET)
+16: {
+17: delay_ms(20);
+18: if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == Bit_RESET)
+19: {
+20: while (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == Bit_RESET);
+21: return 1;
+22: }
+23: }
+24: return 0;
+25: }
+26: /* ================================================================
+27: *                         ??????
+28: * ================================================================ */
+29: 
+30: /* ==================== 语音播报 GBK 编码 ==================== */
+31: #define TTS_PLEASE_SELECT     "\xC7\xEB\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "请选择任务"
+32: #define TTS_NO_TASK_SELECTED  "\xCE\xB4\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "未选择任务"
+33: #define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执行"
+34: 
+35: // "任务一" ... "任务四"的GBK
+36: char* TASK_NAMES[5] = {
+37:     "",
+38:     "\xC8\xCE\xCE\xF1\xD2\xBB", 
+39:     "\xC8\xCE\xCE\xF1\xB6\xFE", 
+40:     "\xC8\xCE\xCE\xF1\xC8\xFD", 
+41:     "\xC8\xCE\xCE\xF1\xCB\xC4"
+42: };
+43: 
+44: // "开始任务一" ~ "开始任务四"
+45: char* START_TASK_NAMES[5] = {
+46:     "",
+47:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xD2\xBB",
+48:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xB6\xFE",
+49:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xC8\xFD",
+50:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xCB\xC4"
+51: };
+52: 
+53: /* ==================== 系统调度状态 ==================== */
+54: typedef enum {
+55:     SYS_STATE_TASK_SELECT = 0,
+56:     SYS_STATE_TASK_RUNNING
+57: } SystemState_t;
+58: 
+59: typedef enum {
+60:     KEY_EVENT_NONE = 0,
+61:     KEY_EVENT_SHORT,
+62:     KEY_EVENT_LONG
+63: } KeyEvent_t;
+64: 
+65: SystemState_t g_sys_state = SYS_STATE_TASK_SELECT;
+66: uint8_t g_selected_task = 0; 
+67: 
+68: KeyEvent_t Get_Key_Event(void) 
+69: {
+70:     static uint32_t key_down_tick = 0;
+71:     static uint8_t  key_pressed = 0;
+72:     
+73:     if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == 0) 
+74:     {
+75:         if (key_pressed == 0) 
+76:         {
+77:             delay_ms(20); 
+78:             if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == 0) 
+79:             {
+80:                 key_pressed = 1;
+81:                 key_down_tick = HAL_GetTick(); 
+82:             }
+83:         }
+84:     } 
+85:     else 
+86:     {
+87:         if (key_pressed == 1) 
+88:         {
+89:             uint32_t hold_time;
+90: 
+91: 
+92:             key_pressed = 0; 
+93:             hold_time = HAL_GetTick() - key_down_tick;
+94:             
+95:             if (hold_time >= 1000)      
+96:             {
+97:                 return KEY_EVENT_LONG;
+98:             } 
+99:             else if (hold_time >= 50)   
+100:             {
+101:                 return KEY_EVENT_SHORT;
+102:             }
+103:         }
+104:     }
+105:     return KEY_EVENT_NONE;
+106: }
+107: 
+108: void System_Scheduler(void)
+109: {
+110:     SYN6658_Speak(TTS_PLEASE_SELECT); 
+111:     g_sys_state = SYS_STATE_TASK_SELECT;
+112:     g_selected_task = 0;
+113: 
+114:     while (1)
+115:     {
+116:         if (g_sys_state == SYS_STATE_TASK_SELECT)
+117:         {
+118:             KeyEvent_t key = Get_Key_Event(); 
+119: 
+120:             if (key == KEY_EVENT_SHORT) 
+121:             {
+122:                 g_selected_task++;
+123:                 if(g_selected_task > 4) g_selected_task = 1;
+124:                 SYN6658_Speak(TASK_NAMES[g_selected_task]);
+125:             }
+126:             else if (key == KEY_EVENT_LONG)
+127:             {
+128:                 if (g_selected_task == 0)
+129:                 {
+130:                     SYN6658_Speak(TTS_NO_TASK_SELECTED); 
+131:                 }
+132:                 else
+133:                 {
+134:                     SYN6658_Speak(START_TASK_NAMES[g_selected_task]);
+135:                     delay_ms(1500); // 等待语音播报结束
+136:                     g_sys_state = SYS_STATE_TASK_RUNNING;
+137:                 }
+138:             }
+139:         }
+140:         else if (g_sys_state == SYS_STATE_TASK_RUNNING)
+141:         {
+142:             switch (g_selected_task)
+143:             {
+144:                 case 1: Task1_Run(); break;
+145:                 case 2: Task2_Run(); break;
+146:                 case 3: Task3_Run(); break;
+147:                 case 4: Task4_Run(); break;
+148:             }
+149:         }
+150:     }
+151: }
+152: 
+153: 
+154: /* ==================== 语音播报 GBK 编码 ==================== */
+155: #define TTS_PLEASE_SELECT     "\xC7\xEB\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "请选择任务"
+156: #define TTS_NO_TASK_SELECTED  "\xCE\xB4\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "未选择任务"
+157: #define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执行"
+158: 
+159: // "任务一" ... "任务四"的GBK
+160: char* TASK_NAMES[5] = {
+161:     "",
+162:     "\xC8\xCE\xCE\xF1\xD2\xBB", 
+163:     "\xC8\xCE\xCE\xF1\xB6\xFE", 
+164:     "\xC8\xCE\xCE\xF1\xC8\xFD", 
+165:     "\xC8\xCE\xCE\xF1\xCB\xC4"
+166: };
+167: 
+168: // "开始任务一" ~ "开始任务四"
+169: char* START_TASK_NAMES[5] = {
+170:     "",
+171:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xD2\xBB",
+172:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xB6\xFE",
+173:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xC8\xFD",
+174:     "\xBF\xAA\xCA\xBC\xC8\xCE\xCE\xF1\xCB\xC4"
+175: };
+176: 
+177: /* ==================== 系统调度状态 ==================== */
+178: typedef enum {
+179:     SYS_STATE_TASK_SELECT = 0,
+180:     SYS_STATE_TASK_RUNNING
+181: } SystemState_t;
+182: 
+183: typedef enum {
+184:     KEY_EVENT_NONE = 0,
+185:     KEY_EVENT_SHORT,
+186:     KEY_EVENT_LONG
+187: } KeyEvent_t;
+188: 
+189: SystemState_t g_sys_state = SYS_STATE_TASK_SELECT;
+190: uint8_t g_selected_task = 0; 
+191: 
+192: KeyEvent_t Get_Key_Event(void) 
+193: {
+194:     static uint32_t key_down_tick = 0;
+195:     static uint8_t  key_pressed = 0;
+196:     
+197:     if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == 0) 
+198:     {
+199:         if (key_pressed == 0) 
+200:         {
+201:             delay_ms(20); 
+202:             if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == 0) 
+203:             {
+204:                 key_pressed = 1;
+205:                 key_down_tick = HAL_GetTick(); 
+206:             }
+207:         }
+208:     } 
+209:     else 
+210:     {
+211:         if (key_pressed == 1) 
+212:         {
+213:             uint32_t hold_time;
+214: 
+215: 
+216:             key_pressed = 0; 
+217:             hold_time = HAL_GetTick() - key_down_tick;
+218:             
+219:             if (hold_time >= 1000)      
+220:             {
+221:                 return KEY_EVENT_LONG;
+222:             } 
+223:             else if (hold_time >= 50)   
+224:             {
+225:                 return KEY_EVENT_SHORT;
+226:             }
+227:         }
+228:     }
+229:     return KEY_EVENT_NONE;
+230: }
+231: 
+232: void System_Scheduler(void)
+233: {
+234:     SYN6658_Speak(TTS_PLEASE_SELECT); 
+235:     g_sys_state = SYS_STATE_TASK_SELECT;
+236:     g_selected_task = 0;
+237: 
+238:     while (1)
+239:     {
+240:         if (g_sys_state == SYS_STATE_TASK_SELECT)
+241:         {
+242:             KeyEvent_t key = Get_Key_Event(); 
+243: 
+244:             if (key == KEY_EVENT_SHORT) 
+245:             {
+246:                 g_selected_task++;
+247:                 if(g_selected_task > 4) g_selected_task = 1;
+248:                 SYN6658_Speak(TASK_NAMES[g_selected_task]);
+249:             }
+250:             else if (key == KEY_EVENT_LONG)
+251:             {
+252:                 if (g_selected_task == 0)
+253:                 {
+254:                     SYN6658_Speak(TTS_NO_TASK_SELECTED); 
+255:                 }
+256:                 else
+257:                 {
+258:                     SYN6658_Speak(START_TASK_NAMES[g_selected_task]);
+259:                     delay_ms(1500); // 等待语音播报结束
+260:                     g_sys_state = SYS_STATE_TASK_RUNNING;
+261:                 }
+262:             }
+263:         }
+264:         else if (g_sys_state == SYS_STATE_TASK_RUNNING)
+265:         {
+266:             switch (g_selected_task)
+267:             {
+268:                 case 1: Task1_Run(); break;
+269:                 case 2: Task2_Run(); break;
+270:                 case 3: Task3_Run(); break;
+271:                 case 4: Task4_Run(); break;
+272:             }
+273:         }
+274:     }
+275: }
+276: 
+277: int main(void)
+278: {
+279: /* 1????????????????? */
+280: SysTick_Config(SystemCoreClock / 1000); // ??????SysTick????HAL_GetTick????
+281: delay_ms(1000);
+282: /* ?????????NVIC????????????? */
+283: NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
+284: /* ????????????? */
+285: MX_TIM1_PWM_Init();           // 定时器1 PWM (PA8~PA11)
+286: Motor_GPIO_Init();            // 电机引脚/接口
+287: 
+288:     /* 闭环必须：使能编码器与定时器 */
+289:     MX_TIM2_Encoder_Init();
+290:     MX_TIM3_Encoder_Init();
+291:     MX_TIM6_Init();               // 核心计算定时器 (10ms)
+292:     
+293:     /* 速度环PID参数初始化 (Kp, Ki, Kd, OutMax, OutMin) */
+294:     /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭矩 */
+295:     PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
+296:     PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
+297: 
+298:     MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
+299: MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
+300: SYN6658_Init();               // ???????????
+301: OpenMV_Init();                // OpenMV 初始化
+302: IR_Init();                    // 5路红外模块
+303: MX_USART3_Init();             // MPU6050模块串口
+304: MPU6050_Init();               // 串口MPU数据接口
+305: Alert_Init();                 // 声光报警初始化
+306: StartButton_Init();           // 初始化PA15作为启动按键
+307: 
+308: /* ====== 上电完成提示 ====== */
+309: SYN6658_Speak("\xC9\xCF\xB5\xE7\xCD\xEA\xB3\xC9"); // "上电完成"的GBK十六进制
+310: Alert_Beep();                 // 蜂鸣器短促滴一声
+311: /* ========================== */
+312: 
+313: /* ????? */
+314: Motor_Stop();
+315: Motor_Enable(1);
+316: /* ==============================================
+317: *                 ???????????????????????
+318: * ============================================== */
+319:     System_Scheduler();
+320: }

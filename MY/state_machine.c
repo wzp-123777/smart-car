@@ -108,10 +108,14 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
          */
         if (event == EVENT_CROSS_DETECTED)
         {
-            /* 检测到十字路口/标记线 → 停车检测 */
+            /* 检测到十字路口/标记线 -> 累加检查点，不停车，发送视觉请求 */
             sm->checkpoint_count++;
-            Motor_Stop();
-            SM_TransitionTo(sm, STATE_STOP_AND_DETECT);
+            Alert_Checkpoint(100);
+            
+            /* 异步发送识别指令给OpenMV，继续巡线 */
+            OpenMV_SendCmd(OPENMV_CMD_DETECT);
+            OpenMV_ClearNewFlag();
+            // 不阻塞，不改变状态
         }
         else if (event == EVENT_REACHED_END)
         {
@@ -119,67 +123,18 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
             Motor_Stop();
             SM_TransitionTo(sm, STATE_FINISHED);
         }
-        break;
 
-    /* ==================== 停车稳定 ==================== */
-    case STATE_STOP_AND_DETECT:
-        Motor_Stop();
-
-        /* 等待500ms稳定后进入视觉识别 */
-        if (SM_IsTimeout(sm))
+        /* 异步处理OpenMV返回的数据 */
+        if (g_openmv_data.is_new)
         {
-            /* 声光提示：亮灯+鸣笛 500ms */
-            Alert_Checkpoint(500);
-
-            /* 发送识别指令给OpenMV */
-            OpenMV_SendCmd(OPENMV_CMD_DETECT);
-            OpenMV_ClearNewFlag();  /* 清除之前的废弃数据，由于发出了新指令，只等最新的一帧 */
-            SM_TransitionTo(sm, STATE_VISION_DETECT);
-        }
-        break;
-
-    /* ==================== 视觉识别 ==================== */
-    case STATE_VISION_DETECT:
-        Motor_Stop();
-
-        if (event == EVENT_VISION_DONE)
-        {
-            /* OpenMV返回了识别结果 */
             OpenMV_DataTypeDef result = OpenMV_GetResult();
             sm->detected_obj_id = result.object_id;
             OpenMV_ClearNewFlag();
 
-            /* 进入语音播报 */
+            /* 异步语音播报 */
             SYN6658_ReportPoint(sm->checkpoint_count);
-            delay_ms(1500);  /* 等待"到达第X个巡检点"播完 */
+            // 不使用delay阻塞主循环，直接先后发送或者由硬件FIFO缓冲
             SYN6658_ReportObject(sm->detected_obj_id);
-
-            SM_TransitionTo(sm, STATE_VOICE_REPORT);
-        }
-        else if (SM_IsTimeout(sm))
-        {
-            /* 超时未识别到，播报"未识别"后继续巡线 */
-            SYN6658_Speak("未识别到目标");
-            SM_TransitionTo(sm, STATE_VOICE_REPORT);
-        }
-        break;
-
-    /* ==================== 语音播报 ==================== */
-    case STATE_VOICE_REPORT:
-        Motor_Stop();
-
-        if (event == EVENT_VOICE_DONE || SM_IsTimeout(sm))
-        {
-            /* 播报完成，判断是否已到达所有巡检点 */
-            if (sm->checkpoint_count >= sm->total_checkpoints)
-            {
-                SM_TransitionTo(sm, STATE_FINISHED);
-            }
-            else
-            {
-                /* 继续巡线 */
-                SM_TransitionTo(sm, STATE_LINE_FOLLOW);
-            }
         }
         break;
 

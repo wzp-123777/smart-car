@@ -396,6 +396,11 @@
               <FileType>5</FileType>
               <FilePath>..\MY\stm32f4xx_conf.h</FilePath>
             </File>
+            <File>
+              <FileName>task1.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\App\task1.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

@@ -21,7 +21,7 @@
  *                   obj_id = 0x01  # 识别结果
  *                   cx, cy = 160, 120  # 中心坐标
  *                   checksum = (obj_id + (cx>>8) + (cx&0xFF) + (cy>>8) + (cy&0xFF)) & 0xFF
- *                   uart.write(struct.pack('BBBBBBB', 0xBB, obj_id, cx>>8, cx&0xFF, cy>>8, cy&0xFF, checksum, 0x55))
+ *                   uart.write(struct.pack('<BBBBBBBB', 0xBB, obj_id, cx>>8, cx&0xFF, cy>>8, cy&0xFF, checksum, 0x55))
  */
 
 #include "openmv.h"

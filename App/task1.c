@@ -1,39 +1,47 @@
+#include "task.h"
 #include "main.h"
-#include "state_machine.h"
-#include "pid.h"
+#include "encoder.h"
 #include "motor.h"
 #include "mpu6050.h"
+#include "openmv.h"
 #include "infrared.h"
 #include "syn6658.h"
+#include "alert.h"
 
-// 脉冲数/100cm 比例。用户说100cm测出来2591个脉冲。
-#define PULSES_PER_100CM  2591.0f
+extern StateMachine_TypeDef g_state_machine;
+extern MPU6050_DataTypeDef g_mpu_data;
+extern IR_DataTypeDef g_ir_data;
+extern volatile int16_t g_encoder_left;
+extern volatile int16_t g_encoder_right;
+extern uint32_t HAL_GetTick(void);
+extern void delay_ms(uint32_t);
+extern void LineFollow_CalibrateGyroBias(void);
+extern CarEvent_TypeDef DetectEvent(void);
+extern void LineFollow_RunByRawIR(void);
+extern void Debug_LogIR(CarEvent_TypeDef event);
 
+void Task2_Run(void) { while(1) delay_ms(10); }
+void Task3_Run(void) { while(1) delay_ms(10); }
+void Task4_Run(void) { while(1) delay_ms(10); }
+
+
+/* ====== 任务1 状态机：A->B->C->D->A ====== */
 typedef enum {
-    M_STAGE_INIT = 0,
-    M_STAGE_A_TO_B,
-    M_STAGE_B_TO_C,  // U型弯道 B->C
+    M_STAGE_A_TO_B = 0,
+    M_STAGE_B_TURN,
+    M_STAGE_B_TO_C,
+    M_STAGE_C_TURN,
     M_STAGE_C_TO_D,
-    M_STAGE_D_TO_A,  // U型弯道 D->A
-    M_STAGE_DONE
-} MoveStage_t;
-
-static MoveStage_t s_move_stage = M_STAGE_INIT;
-static float s_start_yaw = 0.0f;
-
-/* 计算两个角度的绝对差值，处理跨越区 (-180, 180) */
-static float get_angle_diff(float angle1, float angle2) {
-    float diff = angle1 - angle2;
-    while (diff > 180.0f) diff -= 360.0f;
-    while (diff < -180.0f) diff += 360.0f;
-    return diff;
-}
+    M_STAGE_D_TURN,
+    M_STAGE_D_TO_A,
+    M_STAGE_FINISH
+} MissionStage_t;
 
 void Blink_LED_PC13(void)
 {
-    GPIO_InitTypeDef GPIO_InitStructure;
     // 初始化PC13为输出
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+    GPIO_InitTypeDef GPIO_InitStructure;
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_13;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
     GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
@@ -46,86 +54,88 @@ void Blink_LED_PC13(void)
     GPIO_SetBits(GPIOC, GPIO_Pin_13);   // 灭灯
 }
 
-void Task1_Run(void)
+void Task1_Run(void) 
 {
-    s_move_stage = M_STAGE_INIT;
-    SM_Init(&g_state_machine, 3); // 任意
-
-    Motor_Enable(1);
+    // 初始化原版所需
+    SM_Init(&g_state_machine, 3); 
+    MPU6050_ResetYaw(&g_mpu_data);
+    LineFollow_CalibrateGyroBias();
     IR_ResetTracking();
-    s_start_yaw = g_mpu_data.yaw;
-
-    // 起点A播报: "起点A点"
-    SYN6658_Speak("\xC6\xF0\xB5\xE3\x41\xB5\xE3"); 
+    SM_Process(&g_state_machine, EVENT_START); 
+    
+    // 初始化外层里程逻辑
+    MissionStage_t m_stage = M_STAGE_A_TO_B;
+    int32_t total_distance = 0; // 用编码器累加表示距离
+    
+    // 起点A播报
+    SYN6658_Speak("\xC6\xF0\xB5\xE3\x41\xB5\xE3"); // "起点A点"
     Blink_LED_PC13();
     
-    s_move_stage = M_STAGE_A_TO_B;
+    MPU6050_DataTypeDef last_mpu;
+    MPU6050_ReadAll(&last_mpu);
 
-    while (1)
+    // 主循环
+    while(1)
     {
         IR_Read(&g_ir_data);
         MPU6050_ReadAll(&g_mpu_data);
-
-        // 如果在弯道段，则不再使用节点全黑来判断转移，而是依赖偏航角转过了约 175 度
-        if (s_move_stage == M_STAGE_B_TO_C) {
-            float diff = get_angle_diff(g_mpu_data.yaw, s_start_yaw);
-            if (diff > 170.0f || diff < -170.0f) {
-                // 转过了 180度
-                // 播报: "到达C点"
-                SYN6658_Speak("\xB5\xBD\xB4\xEF\x43\xB5\xE3"); 
-                Blink_LED_PC13();
-                s_move_stage = M_STAGE_C_TO_D;
-                // 让它稍微再走一点点避免立即退出黑线
-            }
-        }
-        else if (s_move_stage == M_STAGE_D_TO_A) {
-            float diff = get_angle_diff(g_mpu_data.yaw, s_start_yaw);
-            if (diff > 170.0f || diff < -170.0f) {
-                // 转过了 180度
-                // 播报: "回到A点"
-                SYN6658_Speak("\xBB\xD8\xB5\xBD\x41\xB5\xE3"); 
-                Blink_LED_PC13();
-                s_move_stage = M_STAGE_DONE;
-            }
-        }
-        else
+        
+        CarEvent_TypeDef event = DetectEvent(); 
+        
+        // 累加左轮作为参考里程 (需根据您的N20编码器线数修正这个阈值，这里假设大约100对应100cm，请实际测试更改)
+        total_distance += g_encoder_left; 
+        
+        /* 外层任务1逻辑监控 */
+        if (m_stage == M_STAGE_A_TO_B && total_distance > 2591) // 编码器达到2591对应到达B
         {
-            // 在直线段，检查路口黑线
-            CarEvent_TypeDef evt = EVENT_NONE;
-            if (g_ir_data.S1 == 1 && g_ir_data.S2 == 1 && g_ir_data.S3 == 1 && g_ir_data.S4 == 1 && g_ir_data.S5 == 1) {
-                if (g_ir_data.tracking_mode != 2) {
-                    g_ir_data.tracking_mode = 2; // cross
-                    evt = EVENT_CROSSROAD;
-                }
-            } else {
-                g_ir_data.tracking_mode = 1;
+            SYN6658_Speak("\xB5\xBD\xB4\xEF\x42\xB5\xE3"); // 到达B点
+            Blink_LED_PC13();
+            m_stage = M_STAGE_B_TURN;
+            total_distance = 0;
+            MPU6050_ResetYaw(&g_mpu_data); // 重置Yaw偏航角用于转弯积分
+        }
+        else if (m_stage == M_STAGE_B_TURN) 
+        {
+            // B -> C 是弯道，检测偏航角是否达到180度
+            if (g_mpu_data.yaw >= 180.0f || g_mpu_data.yaw <= -180.0f)
+            {
+                SYN6658_Speak("\xB5\xBD\xB4\xEF\x43\xB5\xE3"); // 到达C点
+                Blink_LED_PC13();
+                m_stage = M_STAGE_C_TO_D;
+                total_distance = 0;
+                MPU6050_ResetYaw(&g_mpu_data);
             }
-
-            if (evt == EVENT_CROSSROAD) {
-                if (s_move_stage == M_STAGE_A_TO_B) {
-                    // 播报: "到达B点"
-                    SYN6658_Speak("\xB5\xBD\xB4\xEF\x42\xB5\xE3"); 
-                    Blink_LED_PC13();
-                    s_move_stage = M_STAGE_B_TO_C;
-                    s_start_yaw = g_mpu_data.yaw; // 记录开始转弯的角度
-                } else if (s_move_stage == M_STAGE_C_TO_D) {
-                    // 播报: "到达D点"
-                    SYN6658_Speak("\xB5\xBD\xB4\xEF\x44\xB5\xE3"); 
-                    Blink_LED_PC13();
-                    s_move_stage = M_STAGE_D_TO_A;
-                    s_start_yaw = g_mpu_data.yaw; // 记录开始转弯的角度
-                }
+        }
+        else if (m_stage == M_STAGE_C_TO_D && total_distance > 2591) 
+        {
+            SYN6658_Speak("\xB5\xBD\xB4\xEF\x44\xB5\xE3"); // 到达D点
+            Blink_LED_PC13();
+            m_stage = M_STAGE_D_TURN;
+            total_distance = 0;
+            MPU6050_ResetYaw(&g_mpu_data); // 重置Yaw偏航角用于转弯积分
+        }
+        else if (m_stage == M_STAGE_D_TURN) 
+        {
+            // D -> A 是弯道，检测偏航角是否达到180度
+            if (g_mpu_data.yaw >= 180.0f || g_mpu_data.yaw <= -180.0f)
+            {
+                SYN6658_Speak("\xBB\xD8\xB5\xBD\x41\xB5\xE3"); // 回到A点停车
+                Blink_LED_PC13();
+                Motor_SetSpeed(0, 0); 
+                m_stage = M_STAGE_FINISH;
             }
         }
 
-        if (s_move_stage == M_STAGE_DONE) {
-            Motor_Stop();
-            break;
+        if (m_stage != M_STAGE_FINISH) 
+        {
+            SM_Process(&g_state_machine, event);
+            Debug_LogIR(event);
+            if (g_state_machine.current_state == STATE_LINE_FOLLOW)
+            {
+                LineFollow_RunByRawIR();
+            }
         }
-
-        // 统一使用红外巡线行走
-        LineFollow_RunByRawIR();
-
-        delay_ms(10);
+        
+        delay_ms(10); 
     }
 }

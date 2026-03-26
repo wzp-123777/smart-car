@@ -56,15 +56,12 @@ void IR_Read(IR_DataTypeDef *ir_data)
  * @brief  计算当前黑线相对车体中心的位置
  * @note
  *   1. 权重从左到右依次为 {-20, -10, 0, 10, 20}，比旧版更细腻。
- *   2. 当 5 路传感器全部为白色时，说明当前已经丢线。
- *      这时不再返回 0，而是根据上一拍位置记忆返回 -30 或 +30，
- *      强制车辆继续朝上一拍的偏移方向找线，避免误判为“完美居中”。
+ *   2. 当 5 路传感器全部为白色时，直接返回 0，不做丢线方向记忆。
  *   3. 正常压线时直接做整数平均，依赖 C 语言默认的向零取整特性，
  *      计算简单、执行开销小。
  */
 int8_t IR_GetPosition(IR_DataTypeDef *ir_data)
 {
-    static int8_t last_position = 0;
     static const int8_t weights[IR_SENSOR_COUNT] = {-20, -10, 0, 10, 20};
     int16_t weighted_sum = 0;
     uint8_t active_count = 0;
@@ -80,42 +77,20 @@ int8_t IR_GetPosition(IR_DataTypeDef *ir_data)
         }
     }
 
-    /* 全白丢线：根据上一拍位置强制给出极性方向，避免车辆继续直冲。 */
+    /* 全白丢线：不做方向记忆，直接返回 0。 */
     if (active_count == 0U)
     {
-        if (last_position < 0)
-        {
-            return -30;
-        }
-        if (last_position > 0)
-        {
-            return 30;
-        }
         return 0;
     }
 
     /* 正常检测到黑线时，直接整除得到平滑位置值。 */
     current_position = (int8_t)(weighted_sum / (int16_t)active_count);
-
-    /* 更新历史位置，为下一次丢线判断提供方向记忆。非零才更新，避免正好居中丢线时失去极性记忆 */
-    static uint8_t zero_count = 0;
-    if (current_position != 0)
-    {
-        last_position = current_position;
-        zero_count = 0;
-    }
-    else
-    {
-        zero_count++;
-        // 如果连续超过5拍(50ms)稳定在0，才认为真正处于绝对直线，此时清除极性记忆
-        if (zero_count > 5)
-        {
-            last_position = 0;
-            zero_count = 5; // 防止溢出
-        }
-    }
-
     return current_position;
+}
+
+void IR_ResetTracking(void)
+{
+    /* 丢线记忆已关闭，保留空函数兼容旧调用。 */
 }
 
 

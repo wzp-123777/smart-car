@@ -1,8 +1,8 @@
 #pragma diag_suppress 177
 /**
 * @file    main.c
-* @brief   ??????????? ???? ??????
-* @author  2026??????????
+* @brief   智能巡护小车主程序
+* @author  2026开发团队
 * @note
 *   主控: STM32F407ZGT6 (标准库 SPL)
 *   视觉: OpenMV H7 Plus (UART1, 115200, PB6=TX, PB7=RX)
@@ -14,12 +14,12 @@
 *   报警: 声光模块 (Alert_Init)
 *   PID定时器: TIM6 (10ms触发)
 *
-* ???????????????
-*   ?????????????? CubeMX ?? HAL ????????????????STM32F4 ?????????????
-*   1. ???????????? STM32F4 ????????????????????????CMSIS??STM32F4xx_StdPeriph_Driver????
-*   2. ??????? App ????????????? .c/.h ???????? Keil ????????
-*   3. ?? Keil ????? C/C++ ??????????????????? Define ?????? USE_STDPERIPH_DRIVER??
-*   4. ????????????????????????????? CubeMX ???????????
+* 编程规范与说明:
+*   当前工程不使用 CubeMX 和 HAL 库。
+*   1. 采用标准外设库 CMSIS 和 STM32F4xx_StdPeriph_Driver。
+*   2. 用户代码在 App 目录下。
+*   3. 需定义 USE_STDPERIPH_DRIVER 宏。
+*   4. 避免使用 CubeMX 重新生成代码。
 */
 #include "stm32f4xx.h"
 #include "pid.h"
@@ -33,28 +33,28 @@
 #include "alert.h"
 #include <stdio.h>
 /* ================================================================
-*                     ??????
+*                     全局变量定义
 * ================================================================ */
-/* PID??????????????????? */
+/* PID 左右轮控制 */
 PID_TypeDef g_pid_left;
 PID_TypeDef g_pid_right;
-/* ???PID?????????????????????????? */
+/* 转向 PID 控制 */
 PID_TypeDef g_pid_turn;
-/* ???????????? */
+/* 传感器数据 */
 IR_DataTypeDef g_ir_data;
-/* MPU6050 ???? */
+/* MPU6050 数据 */
 MPU6050_DataTypeDef g_mpu_data;
-/* ???? */
+/* 状态机 */
 StateMachine_TypeDef g_state_machine;
-/* ???????????? */
+/* 编码器读数 */
 volatile int16_t g_encoder_left  = 0;
 volatile int16_t g_encoder_right = 0;
-/* ????????????????????????????????/10ms?? */
+/* 基础速度 / 10ms 周期 */
 int16_t g_base_speed = 15;
-/* PID??? */
+/* PID 计算后的 PWM 值 */
 volatile float g_motor_left_pwm  = 0;
 volatile float g_motor_right_pwm = 0;
-/* 10ms????? */
+/* 10ms 中断标志 */
 volatile uint8_t g_flag_10ms = 0;
 
 static int16_t g_line_debug_left_pwm = 0;
@@ -79,23 +79,21 @@ static const char *g_line_debug_mode = "INIT";
 #define LINE_FOLLOW_GYRO_CAL_SAMPLES   12U
 #define LINE_FOLLOW_GYRO_CAL_DELAY_MS   5U
 /* ================================================================
-*                     ?????????????????SysTick???????????????
+*                     系统滴答定时器函数 SysTick 相关
 * ================================================================ */
 volatile uint32_t g_sys_tick = 0;
 uint32_t HAL_GetTick(void)
 {
 return g_sys_tick;
 }
-/* SysTick_Handler ????? stm32f4xx_it.c ??????????
-* ??????????????????????????????????? stm32f4xx_it.c ???? SysTick_Handler??
-* ??????????????????? stm32f4xx_it.c ?? SysTick_Handler ????
-* ?????????????????????????????????? stm32f4xx_it.c ?????? g_sys_tick++;
+/* SysTick_Handler 在 stm32f4xx_it.c 中定义
+* 并在该函数中累加 g_sys_tick 变量
 */
 // void SysTick_Handler(void)
 // {
 //     g_sys_tick++;
 // }
-/* ??????????????????????? SysTick ???????????????????3????? */
+/* ms 级延时函数，基于 SysTick 时基 */
 void delay_ms(__IO uint32_t nTime)
 {
 uint32_t start_time = HAL_GetTick();
@@ -194,7 +192,7 @@ static void LineFollow_CalibrateGyroBias(void)
     g_mpu_gyro_z_bias = gyro_sum / (float)LINE_FOLLOW_GYRO_CAL_SAMPLES;
 }
 
-static void LineFollow_RunByRawIR(void)
+void LineFollow_RunByRawIR(void)
 {
     float base_speed = LINE_FOLLOW_TARGET_STRAIGHT;
     float steer_strength = 0.0f;
@@ -649,6 +647,132 @@ return 0;
 /* ================================================================
 *                         ??????
 * ================================================================ */
+
+/* ==================== 语音播报 GBK 编码 ==================== */
+#define TTS_PLEASE_SELECT     "\xC7\xEB\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "请选择任务"
+#define TTS_NO_TASK_SELECTED  "\xCE\xB4\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "未选择任务"
+#define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执行"
+
+// "任务1" ... "任务4"的GBK
+char* TASK_NAMES[5] = {
+    "",
+    "\xC8\xCE\xCE\xF1\x31",
+    "\xC8\xCE\xCE\xF1\x32",
+    "\xC8\xCE\xCE\xF1\x33",
+    "\xC8\xCE\xCE\xF1\x34"
+};
+
+// "进入任务1" ~ "进入任务4"
+char* ENTER_TASK_NAMES[5] = {
+    "",
+    "\xBD\xF8\xC8\xEB\xC8\xCE\xCE\xF1\x31",
+    "\xBD\xF8\xC8\xEB\xC8\xCE\xCE\xF1\x32",
+    "\xBD\xF8\xC8\xEB\xC8\xCE\xCE\xF1\x33",
+    "\xBD\xF8\xC8\xEB\xC8\xCE\xCE\xF1\x34"
+};
+
+/* ==================== 系统调度状态 ==================== */
+typedef enum {
+    SYS_STATE_TASK_SELECT = 0,
+    SYS_STATE_TASK_RUNNING
+} SystemState_t;
+
+typedef enum {
+    KEY_EVENT_NONE = 0,
+    KEY_EVENT_SHORT,
+    KEY_EVENT_LONG
+} KeyEvent_t;
+
+SystemState_t g_sys_state = SYS_STATE_TASK_SELECT;
+uint8_t g_selected_task = 0;
+
+KeyEvent_t Get_Key_Event(void)
+{
+    static uint32_t key_down_tick = 0;
+    static uint8_t  key_pressed = 0;
+    uint32_t hold_time = 0;
+
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == 0)
+    {
+        if (key_pressed == 0)
+        {
+            delay_ms(20);
+            if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_15) == 0)
+            {
+                key_pressed = 1;
+                key_down_tick = HAL_GetTick();
+            }
+        }
+    }
+    else
+    {
+        if (key_pressed == 1)
+        {
+            key_pressed = 0;
+            hold_time = HAL_GetTick() - key_down_tick;
+
+            if (hold_time >= 1000)
+            {
+                return KEY_EVENT_LONG;
+            }
+            else if (hold_time >= 50)
+            {
+                return KEY_EVENT_SHORT;
+            }
+        }
+    }
+    return KEY_EVENT_NONE;
+}
+
+extern void Task1_Run(void);
+extern void Task2_Run(void);
+extern void Task3_Run(void);
+extern void Task4_Run(void);
+void System_Scheduler(void)
+{
+    SYN6658_Speak(TTS_PLEASE_SELECT);
+    g_sys_state = SYS_STATE_TASK_SELECT;
+    g_selected_task = 0;
+
+    while (1)
+    {
+        if (g_sys_state == SYS_STATE_TASK_SELECT)
+        {
+            KeyEvent_t key = Get_Key_Event();
+
+            if (key == KEY_EVENT_SHORT)
+            {
+                g_selected_task++;
+                if(g_selected_task > 4) g_selected_task = 1;
+                SYN6658_Speak(TASK_NAMES[g_selected_task]);
+            }
+            else if (key == KEY_EVENT_LONG)
+            {
+                if (g_selected_task == 0)
+                {
+                    SYN6658_Speak(TTS_NO_TASK_SELECTED);
+                }
+                else
+                {
+                    SYN6658_Speak(ENTER_TASK_NAMES[g_selected_task]);      
+                    delay_ms(1500); // 等待语音播报结束
+                    g_sys_state = SYS_STATE_TASK_RUNNING;
+                }
+            }
+        }
+        else if (g_sys_state == SYS_STATE_TASK_RUNNING)
+        {
+            switch (g_selected_task)
+            {
+                case 1: Task1_Run(); break;
+                case 2: Task2_Run(); break;
+                case 3: Task3_Run(); break;
+                case 4: Task4_Run(); break;
+            }
+        }
+    }
+}
+
 int main(void)
 {
 /* 1????????????????? */
@@ -691,63 +815,7 @@ Motor_Enable(1);
 /* ==============================================
 *                 ???????????????????????
 * ============================================== */
-/* ===== 状态机初始化 ===== */
-SM_Init(&g_state_machine, 3); // 假设总共3个巡检点
-Debug_LogText("DBG USART3 ready\r\n");
-/* wait for start button */
-while (StartButton_IsPressed() == 0)
-{
-IR_Read(&g_ir_data);
-MPU6050_ReadAll(&g_mpu_data);
-Debug_LogIR(EVENT_NONE);
-delay_ms(10);
-}
-
-MPU6050_ResetYaw(&g_mpu_data);
-LineFollow_CalibrateGyroBias();
-IR_ResetTracking();
-/* ??????????3???????????????? */
-SYN6658_Speak("??????");
-delay_ms(2000); // ?????????????????????
-/* ????????????????? */
-uint32_t start_run_time = HAL_GetTick();
-/* ??????????MPU????????????????? */
-MPU6050_DataTypeDef last_mpu;
-MPU6050_ReadAll(&last_mpu);
-delay_ms(20);
-// MPU?????????????????????????????????????
-// ?????????????yaw??????????????
-float mpu_pitch_offset = 0.0f;
-// 驱动状态机
-SM_Process(&g_state_machine, EVENT_START);
-/* ========== 主循环 ========== */
-while (1)
-{
-/* 1. 读取传感器 */
-IR_Read(&g_ir_data);
-MPU6050_ReadAll(&g_mpu_data);
-/* 2. 事件检测：全黑、视觉识别完成 */
-CarEvent_TypeDef event;
-int16_t diff_x;
-int16_t diff_y;
-event = DetectEvent();
-/* 3. 开环防倾倒保护（暂不停车，仅保留计算避免 unused 警告） */
-diff_x = g_mpu_data.accel_x - last_mpu.accel_x;
-diff_y = g_mpu_data.accel_y - last_mpu.accel_y;
-(void)diff_x;
-(void)diff_y;
-last_mpu = g_mpu_data;
-/* 4. 推动核心状态机运转 */
-SM_Process(&g_state_machine, event);
-Debug_LogIR(event);
-/* 5. 按照状态机的当前状态执行对应动作 */
-        if (g_state_machine.current_state == STATE_LINE_FOLLOW)
-        {
-            /* 规则式循迹：弯道优先降速，保证最大占空比不超过 50%。 */
-            LineFollow_RunByRawIR();
-        }
-        delay_ms(LINE_FOLLOW_LOOP_DELAY_MS);
-    }
+    System_Scheduler();
 }
 
 /**

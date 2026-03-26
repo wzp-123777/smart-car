@@ -21,13 +21,13 @@
  *                   obj_id = 0x01  # 识别结果
  *                   cx, cy = 160, 120  # 中心坐标
  *                   checksum = (obj_id + (cx>>8) + (cx&0xFF) + (cy>>8) + (cy&0xFF)) & 0xFF
- *                   uart.write(struct.pack('BBBBBBB', 0xBB, obj_id, cx>>8, cx&0xFF, cy>>8, cy&0xFF, checksum, 0x55))
+ *                   uart.write(struct.pack('<BBBBBBBB', 0xBB, obj_id, cx>>8, cx&0xFF, cy>>8, cy&0xFF, checksum, 0x55))
  */
 
 #include "openmv.h"
 
 /* ==================== 全局变量 ==================== */
-OpenMV_DataTypeDef g_openmv_data = {0};
+volatile OpenMV_DataTypeDef g_openmv_data = {0};
 uint8_t g_openmv_rx_buf[OPENMV_RX_BUF_SIZE] = {0};
 uint8_t g_openmv_rx_index = 0;
 
@@ -140,7 +140,17 @@ void OpenMV_ParseByte(uint8_t byte)
  */
 OpenMV_DataTypeDef OpenMV_GetResult(void)
 {
-    return g_openmv_data;
+    OpenMV_DataTypeDef snapshot;
+
+    __disable_irq();
+    snapshot.object_id = g_openmv_data.object_id;
+    snapshot.pos_x = g_openmv_data.pos_x;
+    snapshot.pos_y = g_openmv_data.pos_y;
+    snapshot.is_valid = g_openmv_data.is_valid;
+    snapshot.is_new = g_openmv_data.is_new;
+    __enable_irq();
+
+    return snapshot;
 }
 
 /**
@@ -148,7 +158,13 @@ OpenMV_DataTypeDef OpenMV_GetResult(void)
  */
 uint8_t OpenMV_HasNewData(void)
 {
-    return g_openmv_data.is_new;
+    uint8_t is_new;
+
+    __disable_irq();
+    is_new = g_openmv_data.is_new;
+    __enable_irq();
+
+    return is_new;
 }
 
 /**
@@ -156,6 +172,8 @@ uint8_t OpenMV_HasNewData(void)
  */
 void OpenMV_ClearNewFlag(void)
 {
+    __disable_irq();
     g_openmv_data.is_new = 0;
+    __enable_irq();
 }
 

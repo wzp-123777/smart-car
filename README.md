@@ -151,23 +151,28 @@ smart-car/
 
 > 当前仓库里的 [`OpenMV/main.py`](/D:/KeilMDKARM5.35/smart-car/OpenMV/main.py) 采用“主动识别、主动上报”模式，STM32 侧主要负责接收结果；`App/openmv.c` 中保留了命令帧接口，便于后续切回按需触发。
 
-## 🔄 状态机流程
+## 🔄 系统调度与状态机流程
 
+### 启动与任务选择流程
 ```
-[IDLE] ──按下启动键──→ [LINE_FOLLOW] ──检测到标记线──→ [STOP_AND_DETECT]
-                            ↑                              │ (等待500ms)
+[POWER ON] ──所有外设初始化──→ 语音播报"上电完成"、蜂鸣器滴一声
+      │
+      ↓
+[TASK_SELECT] 
+      │
+      ├── 短按 PA15 ──→ 切换任务 (1->2->3->4->1)并语音播报 "任务X"
+      │
+      └── 长按 PA15 (≥1秒) ──→ 语音播报 "进入任务X" ──→ [TASK_RUNNING]
+```
+
+### 任务运行流程 (以基础巡线为例)
+```
+[TASK_RUNNING] ──→ [LINE_FOLLOW] ──检测到标记线──→ [VISION_DETECT] (发指令给OpenMV)
+                            ↑                              │ 
                             │                              ↓
-                            │                      [VISION_DETECT]
-                            │                       │ (发送检测指令给OpenMV)
-                            │                       ↓
-                            │                   [VOICE_REPORT]
-                            │                    │ (SYN6658播报结果)
-                            │                    ↓
-                            └──播报完成，继续巡线──┘
-                                                 │
-                                           所有点完成
-                                                 ↓
-                                           [FINISHED]
+                            │                      [VOICE_REPORT] (播报结果)
+                            │                              │
+                            └──播报完成，继续巡线──────────┘
 ```
 
 ## 🏁 比赛现场快速修改清单
@@ -192,3 +197,7 @@ smart-car/
 3. **MPU姿态模块**：由于采用的是串口输出通信的 MPU6050 / JY61，非原生 I2C 接口，请务必直接接在 USART3 (PB10/PB11)。不要接 I2C 引脚。
 4. **语音延时**：SYN6658 播报需要时间，主循环里仍保留了阻塞等待
 5. **串口占用**：`USART1` 给 OpenMV，`USART2` 给 SYN6658，`USART3` 给姿态模块
+## 更新说明 (2026年3月)
+- **胶囊跑道任务1逻辑**: A -> B(编码器2591脉冲直行) -> C(MPU6050偏航180度半圆) -> D(编码器2591脉冲直行) -> A(MPU6050偏航180度完成闭环)。已在 task1.c 实现。
+- **异步无阻塞状态机**: state_machine.c 已移除 STATE_STOP_AND_DETECT, STATE_VISION_DETECT, STATE_VOICE_REPORT 阻塞态。现在循迹时发现标记可实现无极不停顿语音播报并连续请求 OpenCV 取图。
+- **代码修复与优化**: 修复 main.c 乱码注释问题，并修正 openmv.c 结构体拼装 BB 数量的解包注释错误。
