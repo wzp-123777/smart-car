@@ -308,7 +308,8 @@ void LineFollow_RunByRawIR(void)
 *                     ???????????? (??????)
 * ================================================================ */
 /**
-* @brief  TIM1 PWM????? ???? ??????? (168MHz / 168 / 1000 = 1kHz)
+* @brief  TIM1 PWM 初始化 (频率 16.8kHz，消除电机滋滋声)
+*         SYSCLK 168MHz / Prescaler 10 / Period 1000 = 16.8kHz
 *         PA8~PA11 (CH1~CH4)
 */
 static void MX_TIM1_PWM_Init(void)
@@ -328,9 +329,9 @@ GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
 GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
 GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
 GPIO_Init(GPIOA, &GPIO_InitStructure);
-TIM_TimeBaseStructure.TIM_Prescaler = 168 - 1;
+TIM_TimeBaseStructure.TIM_Prescaler = 10 - 1; // 由 168-1 改为 10-1，频率提升 16.8 倍
 TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-TIM_TimeBaseStructure.TIM_Period = 1000 - 1;
+TIM_TimeBaseStructure.TIM_Period = 1000 - 1;  // 维持 1000 分辨率不变
 TIM_TimeBaseStructure.TIM_ClockDivision = 0;
 TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
 TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStructure);
@@ -393,7 +394,7 @@ TIM_SetCounter(TIM3, 0);
 TIM_Cmd(TIM3, ENABLE);
 }
 /**
-* @brief  TIM6 ????????? ???? 10ms PID????????
+* @brief  TIM6 初始化：底层 10ms PID速度闭环中断
 *         84MHz(APB1) / 840 / 1000 = 100Hz (10ms)
 */
 static void MX_TIM6_Init(void)
@@ -401,7 +402,7 @@ static void MX_TIM6_Init(void)
 TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
 NVIC_InitTypeDef NVIC_InitStructure;
 RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM6, ENABLE);
-TIM_TimeBaseStructure.TIM_Period = 1000 - 1;
+TIM_TimeBaseStructure.TIM_Period = 1000 - 1; /* 500 改为 1000 -> 10ms */
 TIM_TimeBaseStructure.TIM_Prescaler = 840 - 1;
 TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
 TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
@@ -529,7 +530,7 @@ if(USART_GetFlagStatus(USART1, USART_FLAG_ORE) != RESET)
 USART_ReceiveData(USART1); /* 读数据寄存器清除ORE */
 }}
 /**
-* @brief  TIM6 ????????? ???? 10ms PID?????????
+* @brief  TIM6 中断服务函数：10ms执行一次PID计算和姿态更新
 */
 void TIM6_DAC_IRQHandler(void)
 {
@@ -539,14 +540,13 @@ void TIM6_DAC_IRQHandler(void)
     if (TIM_GetITStatus(TIM6, TIM_IT_Update) != RESET)
     {
         TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
-        
-        /* ===== 1. 获取编码器反馈值 ===== */
-        g_encoder_left  = Encoder_Read_TIM2(); 
-        g_encoder_right = Encoder_Read_TIM3();
-        
-        /* ===== 2. MPU6050 姿态结算 ===== */
-        MPU6050_UpdateYaw(&g_mpu_data, 0.01f);
 
+        /* ===== 1. 获取编码器反馈值 ===== */
+        g_encoder_left  = Encoder_Read_TIM2();
+        g_encoder_right = Encoder_Read_TIM3();
+
+        /* ===== 2. MPU6050 姿态结算 ===== */
+        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt为0.01s
         /* ===== 4. 内环：PID速度闭环执行 ===== */
         if (g_pid_left.target == 0.0f)
         {
@@ -806,8 +806,6 @@ StartButton_Init();           // 初始化PA15作为启动按键
 
 /* ====== 上电完成提示 ====== */
 SYN6658_Speak("\xC9\xCF\xB5\xE7\xCD\xEA\xB3\xC9"); // "上电完成"的GBK十六进制
-Alert_Beep();                 // 蜂鸣器短促滴一声
-/* ========================== */
 
 /* ????? */
 Motor_Stop();

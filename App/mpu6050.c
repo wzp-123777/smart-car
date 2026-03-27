@@ -4,6 +4,9 @@ volatile MPU6050_DataTypeDef g_mpu_data_uart = {0};
 static uint8_t rx_buf[11];
 static uint8_t rx_index = 0;
 
+static float prev_raw_yaw = 0.0f;
+static float yaw_accumulated = 0.0f;
+
 void MPU6050_Init(void) { }
 
 void MPU6050_ReadAll(MPU6050_DataTypeDef *data) {
@@ -15,16 +18,34 @@ void MPU6050_ReadAll(MPU6050_DataTypeDef *data) {
     data->gyro_y = g_mpu_data_uart.gyro_y;
     data->gyro_z = g_mpu_data_uart.gyro_z;
     data->gyro_z_dps = g_mpu_data_uart.gyro_z_dps;
-    data->yaw = g_mpu_data_uart.yaw;
+
+    // 解包JY61的绝对角度并累加，防止-180~180突变导致任务判断失败
+    float current_raw_yaw = g_mpu_data_uart.yaw;
+    float delta = current_raw_yaw - prev_raw_yaw;
+    
+    if (delta > 180.0f) {
+        delta -= 360.0f;
+    } else if (delta < -180.0f) {
+        delta += 360.0f;
+    }
+    
+    yaw_accumulated += delta;
+    prev_raw_yaw = current_raw_yaw;
+    
+    data->yaw = yaw_accumulated;
+    
     __enable_irq();
 }
 
-void MPU6050_UpdateYaw(MPU6050_DataTypeDef *data, float dt) { }
+void MPU6050_UpdateYaw(MPU6050_DataTypeDef *data, float dt) { 
+    // 留空，使用串口传来的自带结算结果并在ReadAll中处理累加
+}
 
 void MPU6050_ResetYaw(MPU6050_DataTypeDef *data) {
     __disable_irq();
+    yaw_accumulated = 0.0f;
+    prev_raw_yaw = g_mpu_data_uart.yaw;
     data->yaw = 0.0f;
-    g_mpu_data_uart.yaw = 0.0f;
     __enable_irq();
 }
 

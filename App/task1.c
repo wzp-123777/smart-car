@@ -7,9 +7,11 @@
 #include "openmv.h"
 #include "infrared.h"
 #include "syn6658.h"
-#include "alert.h"
+#include "pid.h"
 
 extern StateMachine_TypeDef g_state_machine;
+extern PID_TypeDef g_pid_left;
+extern PID_TypeDef g_pid_right;
 extern MPU6050_DataTypeDef g_mpu_data;
 extern IR_DataTypeDef g_ir_data;
 extern volatile int16_t g_encoder_left;
@@ -22,25 +24,14 @@ extern void LineFollow_RunByRawIR(void);
 extern void Debug_LogIR(CarEvent_TypeDef event);
 
 void Task2_Run(void) { while(1) delay_ms(10); }
-void Task3_Run(void) { while(1) delay_ms(10); }
 void Task4_Run(void) { while(1) delay_ms(10); }
 
 
-/* ====== 任务1 状态机：A->B->C->D->A ====== */
-typedef enum {
-    M_STAGE_A_TO_B = 0,
-    M_STAGE_B_TURN,
-    M_STAGE_B_TO_C,
-    M_STAGE_C_TURN,
-    M_STAGE_C_TO_D,
-    M_STAGE_D_TURN,
-    M_STAGE_D_TO_A,
-    M_STAGE_FINISH
-} MissionStage_t;
+/* ====== 任务1 状�机：A->B->C->D->A ====== */
 
 void Blink_LED_PC13(void)
 {
-    // 初始化PC13为输出
+    // 初�化PC13为输�
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
     GPIO_InitTypeDef GPIO_InitStructure;
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_13;
@@ -50,93 +41,161 @@ void Blink_LED_PC13(void)
     GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
     GPIO_Init(GPIOC, &GPIO_InitStructure);
     
-    GPIO_ResetBits(GPIOC, GPIO_Pin_13); // 亮灯
+    GPIO_ResetBits(GPIOC, GPIO_Pin_13); // ��
     delay_ms(200);
-    GPIO_SetBits(GPIOC, GPIO_Pin_13);   // 灭灯
+    GPIO_SetBits(GPIOC, GPIO_Pin_13);   // ��
 }
 
 void Task1_Run(void) 
 {
-    // 初始化原版所需
+    // 初�化原版��
     SM_Init(&g_state_machine, 3); 
     MPU6050_ResetYaw(&g_mpu_data);
     LineFollow_CalibrateGyroBias();
     IR_ResetTracking();
     SM_Process(&g_state_machine, EVENT_START); 
     
-    // 初始化外层里程逻辑
-    MissionStage_t m_stage = M_STAGE_A_TO_B;
-    int32_t total_distance = 0; // 用编码器累加表示距离
+    // 初�化外层里程逻辑：�线程状态标�
+    int32_t total_pulse = 0; 
+    uint8_t passed_B = 0;
+    uint8_t passed_C = 0;
+    uint8_t passed_D = 0;
     
-    // 起点A播报
-    SYN6658_ReportStation('A'); // "起点A点"
+    // 起点��示意，取消�音播报以防和“进入任务一”重叠�致冲突
     Blink_LED_PC13();
     
+    // 强制等待�下，防�电机启动过于突�带来干扰，同时�状态机预�
+    delay_ms(500); 
+    
+    // 清除这期间可能积攒的OpenMV事件，避免��触发覆盖
+    OpenMV_ClearNewFlag();
+
+    // 更新初��度数据
     MPU6050_DataTypeDef last_mpu;
     MPU6050_ReadAll(&last_mpu);
 
-    // 主循环
+    // 记录上一�的IR状�用于边缘判�
+    uint8_t last_ir[5] = {0};
+    IR_Read(&g_ir_data);
+    for(int i=0; i<5; i++) last_ir[i] = g_ir_data.sensor[i];
+
+    // 主循�
     while(1)
     {
+        // 1. 时时刻刻获取并更新传感器数据
         IR_Read(&g_ir_data);
         MPU6050_ReadAll(&g_mpu_data);
-        
         CarEvent_TypeDef event = DetectEvent(); 
         
-        // 累加左轮作为参考里程 (需根据您的N20编码器线数修正这个阈值，这里假设大约100对应100cm，请实际测试更改)
-        total_distance += g_encoder_left; 
+        // 判断1�2�4�5路IR传感�（数组下�0,1,3,4）是否发生状态变�
         
-        /* 外层任务1逻辑监控 */
-        if (m_stage == M_STAGE_A_TO_B && total_distance > 2591) // 编码器达到2591对应到达B
+                             
+        // 更新last_ir供下�次判�
+        for(int i=0; i<5; i++) last_ir[i] = g_ir_data.sensor[i];
+        
+        // 2. �立�持�地累加�算脉冲和绝对�度 (脱�阻塞判�)
+        total_pulse += g_encoder_left; 
+        
+        float abs_yaw = g_mpu_data.yaw;
+        if (abs_yaw < 0.0f) abs_yaw = -abs_yaw;
+        
+        // 取��度的绝对�，用于防抖判断
+        float abs_gyro_z = g_mpu_data.gyro_z_dps;
+        if (abs_gyro_z < 0.0f) abs_gyro_z = -abs_gyro_z;
+        
+        // 3. �立里程及角度条件判定（�线程并行�辑核心�
+        
+        // 【到达B点�判�：脉冲大�9990，且红�1/2/4/5任意��发生变化，且�曾播报过
+        if (!passed_B && total_pulse >= 10000) 
         {
-            SYN6658_ReportStation('B'); // 到达B点
+            SYN6658_ReportStation('B'); // 到达B�
             Blink_LED_PC13();
-            m_stage = M_STAGE_B_TURN;
-            total_distance = 0;
-            MPU6050_ResetYaw(&g_mpu_data); // 重置Yaw偏航角用于转弯积分
+            passed_B = 1;
+            // B点不重置，因为脉冲重�在C点进�
         }
-        else if (m_stage == M_STAGE_B_TURN) 
+        
+        // 【到达C点�判�：�度达到170度绝对�，且��度小于15�/秒，且未曾播报过
+        if (!passed_C && abs_yaw > 175.0f) 
         {
-            // B -> C 是弯道，检测偏航角是否达到180度
-            if (g_mpu_data.yaw >= 180.0f || g_mpu_data.yaw <= -180.0f)
-            {
-                SYN6658_ReportStation('C'); // 到达C点
-                Blink_LED_PC13();
-                m_stage = M_STAGE_C_TO_D;
-                total_distance = 0;
-                MPU6050_ResetYaw(&g_mpu_data);
-            }
-        }
-        else if (m_stage == M_STAGE_C_TO_D && total_distance > 2591) 
-        {
-            SYN6658_ReportStation('D'); // 到达D点
+            SYN6658_ReportStation('C'); // 到达C�
             Blink_LED_PC13();
-            m_stage = M_STAGE_D_TURN;
-            total_distance = 0;
-            MPU6050_ResetYaw(&g_mpu_data); // 重置Yaw偏航角用于转弯积分
+            passed_C = 1;
+            
+            // 核心要求：与此同时清空脉冲�数，重新�录
+            total_pulse = 0; 
         }
-        else if (m_stage == M_STAGE_D_TURN) 
+        
+        // 【到达D点�判�：在清空后续（即C点后），脉冲再一次大�9990且红�1/2/4/5任意��发生变化
+        if (passed_C && !passed_D && total_pulse >= 10000) 
         {
-            // D -> A 是弯道，检测偏航角是否达到180度
-            if (g_mpu_data.yaw >= 180.0f || g_mpu_data.yaw <= -180.0f)
-            {
-                SYN6658_ReportStation('A'); // 回到A点停车
-                Blink_LED_PC13();
-                Motor_Stop(); 
-                m_stage = M_STAGE_FINISH;
+            SYN6658_ReportStation('D'); // 到达D�
+            Blink_LED_PC13();
+            passed_D = 1;
+        }
+        
+        // 【返回A点�终点判�：一直监测�度，�果达到350度绝对�且角�度小于15，�为终点
+        if (abs_yaw > 360.0f) 
+        {
+            SYN6658_ReportStation('A'); // 回到A点停�
+            Blink_LED_PC13();
+            // 先将PID�标清零，取消��输出带来的抗拒干�
+            g_pid_left.target = 0;
+            g_pid_right.target = 0;
+            Motor_Stop(); 
+            
+            // 任务完全结束，锁死保持停�
+            while(1) {
+                g_pid_left.target = 0;
+                g_pid_right.target = 0;
+                Motor_Stop();
+                delay_ms(100);
             }
         }
 
-        if (m_stage != M_STAGE_FINISH) 
+        // 4. 寻线状�机逻辑完全解�并在主���同时执�
+        SM_Process(&g_state_machine, event);
+        Debug_LogIR(event);
+        if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
-            SM_Process(&g_state_machine, event);
-            Debug_LogIR(event);
-            if (g_state_machine.current_state == STATE_LINE_FOLLOW)
-            {
-                LineFollow_RunByRawIR();
-            }
+            LineFollow_RunByRawIR();
         }
         
-        delay_ms(10); 
+        delay_ms(10); // 同�将主循�周期改回10ms
+    }
+}
+
+
+
+
+
+
+
+
+
+void Task3_Run(void) 
+{
+    g_pid_left.target = 0;
+    g_pid_right.target = 0;
+    Motor_Stop();
+    
+    OpenMV_ClearNewFlag();
+        while(1)
+    {
+        g_pid_left.target = 0;
+        g_pid_right.target = 0;
+        Motor_Stop();
+
+        if (OpenMV_HasNewData())
+        {
+            OpenMV_DataTypeDef mv = OpenMV_GetResult();
+            if (mv.is_valid && mv.object_id != 0) 
+            {
+                SYN6658_ReportObject(mv.object_id); 
+                Blink_LED_PC13();
+                delay_ms(1500); 
+            }
+            OpenMV_ClearNewFlag(); 
+        }
+        delay_ms(10);
     }
 }
