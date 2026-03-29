@@ -15,10 +15,10 @@ void IR_Init(void)
 
     RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
 
-    /* 配置 PD1~PD5 为普通输入，巡线模块本身提供数字输出 */
+    /* 配置 PD1~PD5 为数字输入；开启上拉可降低悬空抖动导致的误判概率 */
     GPIO_InitStruct.GPIO_Pin   = IR1_PIN | IR2_PIN | IR3_PIN | IR4_PIN | IR5_PIN;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IN;
-    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_NOPULL;
+    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_UP;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(GPIOD, &GPIO_InitStruct);
 }

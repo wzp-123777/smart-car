@@ -65,19 +65,43 @@ static const char *g_line_debug_mode = "INIT";
 
 #define LINE_DEBUG_INTERVAL_MS     150U
 #define LINE_FOLLOW_LOOP_DELAY_MS    5U
-#define LINE_FOLLOW_TARGET_STRAIGHT    35.0f   // 提速前为 20.0
-#define LINE_FOLLOW_TARGET_FINE        30.0f   // 提速前为 18.0
-#define LINE_FOLLOW_TARGET_STRONG      25.0f   // 提速前为 14.0
-#define LINE_FOLLOW_TARGET_LOST         0.0f
-#define LINE_FOLLOW_TARGET_SEARCH      20.0f   // 提速前为 12.0
-#define LINE_FOLLOW_FINE_ADJUST        14.0f   // 放大转弯差速
-#define LINE_FOLLOW_STRONG_ADJUST      25.0f   // 放大转弯差速
-#define LINE_FOLLOW_SEARCH_ADJUST      40.0f   // 放大转弯差速
-#define LINE_FOLLOW_GYRO_DAMP           0.05f
-#define LINE_FOLLOW_GYRO_DAMP_MAX       4.0f
-#define LINE_FOLLOW_MIN_INNER_SPEED    -45.0f  // 允许内轮反转，增大反转幅度防抱死
 #define LINE_FOLLOW_GYRO_CAL_SAMPLES   12U
 #define LINE_FOLLOW_GYRO_CAL_DELAY_MS   5U
+
+typedef struct {
+    float target_straight;
+    float target_fine;
+    float target_strong;
+    float target_lost;
+    float target_search;
+    float fine_adjust;
+    float strong_adjust;
+    float search_adjust;
+    float gyro_damp;
+    float gyro_damp_max;
+    float min_inner_speed;
+    uint8_t cross_side_steer;
+} LineFollowProfile_TypeDef;
+
+static const LineFollowProfile_TypeDef g_line_follow_default_profile = {
+    35.0f, 30.0f, 25.0f, 0.0f, 20.0f,
+    14.0f, 25.0f, 40.0f,
+    0.05f, 4.0f, -45.0f, 1U
+};
+
+static const LineFollowProfile_TypeDef g_line_follow_task_profiles[5] = {
+    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f, 1U},
+    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f, 1U},
+    {32.0f, 28.0f, 24.0f, 0.0f, 18.0f, 13.0f, 23.0f, 36.0f, 0.05f, 4.0f, -40.0f, 1U},
+    {26.0f, 22.0f, 18.0f, 0.0f, 15.0f, 11.0f, 18.0f, 30.0f, 0.04f, 3.5f, -32.0f, 1U},
+    {38.0f, 33.0f, 27.0f, 0.0f, 22.0f, 16.0f, 28.0f, 44.0f, 0.06f, 4.0f, -48.0f, 1U}
+};
+
+static LineFollowProfile_TypeDef g_line_follow_active_profile = {
+    35.0f, 30.0f, 25.0f, 0.0f, 20.0f,
+    14.0f, 25.0f, 40.0f,
+    0.05f, 4.0f, -45.0f, 1U
+};
 /* ================================================================
 *                     系统滴答定时器函数 SysTick 相关
 * ================================================================ */
@@ -176,6 +200,33 @@ static float LineFollow_ClampFloat(float value, float min_value, float max_value
     return value;
 }
 
+static void LineFollow_LoadProfile(const LineFollowProfile_TypeDef *profile)
+{
+    if (profile == 0)
+    {
+        return;
+    }
+
+    g_line_follow_active_profile = *profile;
+}
+
+void LineFollow_UseDefaultProfile(void)
+{
+    LineFollow_LoadProfile(&g_line_follow_default_profile);
+}
+
+void LineFollow_UseTaskProfile(uint8_t task_id)
+{
+    if ((task_id >= 1U) && (task_id <= 4U))
+    {
+        LineFollow_LoadProfile(&g_line_follow_task_profiles[task_id]);
+    }
+    else
+    {
+        LineFollow_UseDefaultProfile();
+    }
+}
+
 void LineFollow_CalibrateGyroBias(void)
 {
     MPU6050_DataTypeDef sample;
@@ -194,12 +245,13 @@ void LineFollow_CalibrateGyroBias(void)
 
 void LineFollow_RunByRawIR(void)
 {
-    float base_speed = LINE_FOLLOW_TARGET_STRAIGHT;
+    const LineFollowProfile_TypeDef *cfg = &g_line_follow_active_profile;
+    float base_speed = cfg->target_straight;
     float steer_strength = 0.0f;
     float gyro_damp = 0.0f;
     float gyro_rate = g_mpu_data.gyro_z_dps - g_mpu_gyro_z_bias;
-    float speed_left = LINE_FOLLOW_TARGET_STRAIGHT;
-    float speed_right = LINE_FOLLOW_TARGET_STRAIGHT;
+    float speed_left = cfg->target_straight;
+    float speed_right = cfg->target_straight;
     uint8_t left_edge_on = g_ir_data.sensor[0];
     uint8_t left_near_on = g_ir_data.sensor[1];
     uint8_t center_on = g_ir_data.sensor[2];
@@ -214,7 +266,7 @@ void LineFollow_RunByRawIR(void)
 
     if (g_ir_data.all_white != 0U)
     {
-        base_speed = LINE_FOLLOW_TARGET_LOST;
+        base_speed = cfg->target_lost;
         steer_strength = 0.0f;
         g_line_debug_mode = "LOST_0";
     }
@@ -224,14 +276,14 @@ void LineFollow_RunByRawIR(void)
 
         if (left_edge_on != 0U)
         {
-            base_speed = center_on ? LINE_FOLLOW_TARGET_STRONG : LINE_FOLLOW_TARGET_SEARCH;
-            steer_strength = center_on ? LINE_FOLLOW_STRONG_ADJUST : LINE_FOLLOW_SEARCH_ADJUST;
+            base_speed = center_on ? cfg->target_strong : cfg->target_search;
+            steer_strength = center_on ? cfg->strong_adjust : cfg->search_adjust;
             g_line_debug_mode = center_on ? "EDGE_L" : "HARD_L";
         }
         else
         {
-            base_speed = LINE_FOLLOW_TARGET_FINE;
-            steer_strength = LINE_FOLLOW_FINE_ADJUST;
+            base_speed = cfg->target_fine;
+            steer_strength = cfg->fine_adjust;
             g_line_debug_mode = "FINE_L";
         }
     }
@@ -241,14 +293,14 @@ void LineFollow_RunByRawIR(void)
 
         if (right_edge_on != 0U)
         {
-            base_speed = center_on ? LINE_FOLLOW_TARGET_STRONG : LINE_FOLLOW_TARGET_SEARCH;
-            steer_strength = center_on ? LINE_FOLLOW_STRONG_ADJUST : LINE_FOLLOW_SEARCH_ADJUST;
+            base_speed = center_on ? cfg->target_strong : cfg->target_search;
+            steer_strength = center_on ? cfg->strong_adjust : cfg->search_adjust;
             g_line_debug_mode = center_on ? "EDGE_R" : "HARD_R";
         }
         else
         {
-            base_speed = LINE_FOLLOW_TARGET_FINE;
-            steer_strength = LINE_FOLLOW_FINE_ADJUST;
+            base_speed = cfg->target_fine;
+            steer_strength = cfg->fine_adjust;
             g_line_debug_mode = "FINE_R";
         }
     }
@@ -256,28 +308,28 @@ void LineFollow_RunByRawIR(void)
     {
         if ((center_on != 0U) || (g_ir_data.all_black != 0U))
         {
-            base_speed = LINE_FOLLOW_TARGET_STRAIGHT;
+            base_speed = cfg->target_straight;
             g_line_debug_mode = (g_ir_data.all_black != 0U) ? "BLACK" : "CENTER";
         }
         else
         {
-            base_speed = LINE_FOLLOW_TARGET_FINE;
+            base_speed = cfg->target_fine;
             g_line_debug_mode = "BAL";
         }
     }
 
     if (steer_strength > 0.0f)
     {
-        gyro_damp = LineFollow_AbsFloat(gyro_rate) * LINE_FOLLOW_GYRO_DAMP;
-        gyro_damp = LineFollow_ClampFloat(gyro_damp, 0.0f, LINE_FOLLOW_GYRO_DAMP_MAX);
+        gyro_damp = LineFollow_AbsFloat(gyro_rate) * cfg->gyro_damp;
+        gyro_damp = LineFollow_ClampFloat(gyro_damp, 0.0f, cfg->gyro_damp_max);
 
         if ((left_edge_on != 0U) || (right_edge_on != 0U))
         {
-            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 2.0f, LINE_FOLLOW_SEARCH_ADJUST);
+            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 2.0f, cfg->search_adjust);
         }
         else
         {
-            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 0.8f, LINE_FOLLOW_FINE_ADJUST);
+            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 0.8f, cfg->fine_adjust);
         }
     }
 
@@ -286,17 +338,35 @@ void LineFollow_RunByRawIR(void)
 
     if (turn_dir < 0)
     {
-        /* 当前实车方向：左侧红外命中时，由右侧作为内轮减速修正。 */
-        speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
-                                            LINE_FOLLOW_MIN_INNER_SPEED,
-                                            LINE_FOLLOW_TARGET_STRAIGHT);
+        if (cfg->cross_side_steer != 0U)
+        {
+            /* 当前任务使用交叉侧减速：线在左侧时，压低右轮。 */
+            speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
+                                                cfg->min_inner_speed,
+                                                cfg->target_straight);
+        }
+        else
+        {
+            speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
+                                               cfg->min_inner_speed,
+                                               cfg->target_straight);
+        }
     }
     else if (turn_dir > 0)
     {
-        /* 当前实车方向：右侧红外命中时，由左侧作为内轮减速修正。 */
-        speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
-                                           LINE_FOLLOW_MIN_INNER_SPEED,
-                                           LINE_FOLLOW_TARGET_STRAIGHT);
+        if (cfg->cross_side_steer != 0U)
+        {
+            /* 当前任务使用交叉侧减速：线在右侧时，压低左轮。 */
+            speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
+                                               cfg->min_inner_speed,
+                                               cfg->target_straight);
+        }
+        else
+        {
+            speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
+                                                cfg->min_inner_speed,
+                                                cfg->target_straight);
+        }
     }
 
     g_pid_left.target = speed_left;
@@ -541,13 +611,24 @@ void TIM6_DAC_IRQHandler(void)
     {
         TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
 
-        /* ===== 1. 获取编码器反馈值 ===== */
+        /* ===== 1. 获取部分传感器和编码器反馈值 ===== */
+        IR_Read(&g_ir_data);
         g_encoder_left  = Encoder_Read_TIM2();
         g_encoder_right = Encoder_Read_TIM3();
 
         /* ===== 2. MPU6050 姿态结算 ===== */
         MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt为0.01s
-        /* ===== 4. 内环：PID速度闭环执行 ===== */
+
+        /* ===== 3. 更新声光定时器 (非阻塞) ===== */
+        Alert_Tick10ms();
+
+        /* ===== 4. 强制保护10ms控制周期的循迹更新 ===== */
+        if (g_state_machine.current_state == STATE_LINE_FOLLOW)
+        {
+            LineFollow_RunByRawIR();
+        }
+
+        /* ===== 5. 内环：PID速度闭环执行 ===== */
         if (g_pid_left.target == 0.0f)
         {
             PID_Reset(&g_pid_left);
@@ -793,6 +874,7 @@ Motor_GPIO_Init();            // 电机引脚/接口
     /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭矩 */
     PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
     PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
+    LineFollow_UseDefaultProfile();
 
     MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
 MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
