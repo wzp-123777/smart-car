@@ -338,6 +338,7 @@ void LineFollow_RunByRawIR(void)
 
     if (turn_dir < 0)
     {
+        /* 你的实车当前是交叉侧减速：线在左侧时，压低右轮更符合实际转向。 */
 #if LINE_FOLLOW_CROSS_SIDE_STEER
         speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
                                             cfg->min_inner_speed,
@@ -350,6 +351,7 @@ void LineFollow_RunByRawIR(void)
     }
     else if (turn_dir > 0)
     {
+        /* 你的实车当前是交叉侧减速：线在右侧时，压低左轮更符合实际转向。 */
 #if LINE_FOLLOW_CROSS_SIDE_STEER
         speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
                                            cfg->min_inner_speed,
@@ -603,18 +605,18 @@ void TIM6_DAC_IRQHandler(void)
     {
         TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
 
-        /* ===== 1. 获取部分传感器和编码器反馈�?===== */
+        /* ===== 1. 获取部分传感器和编码器反馈值 ===== */
         IR_Read(&g_ir_data);
         g_encoder_left  = Encoder_Read_TIM2();
         g_encoder_right = Encoder_Read_TIM3();
 
-        /* ===== 2. MPU6050 姿态结�?===== */
-        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt�?.01s
+        /* ===== 2. MPU6050 姿态结算 ===== */
+        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt为0.01s
 
-        /* ===== 3. 更新声光定时�?(非阻�? ===== */
+        /* ===== 3. 更新声光定时器 (非阻塞) ===== */
         Alert_Tick10ms();
 
-        /* ===== 4. 强制保护10ms控制周期的循迹更�?===== */
+        /* ===== 4. 强制保护10ms控制周期的循迹更新 ===== */
         if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
             LineFollow_RunByRawIR();

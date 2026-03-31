@@ -51,6 +51,11 @@ void Alert_Checkpoint(uint16_t duration_ms);
 void Alert_Error(uint8_t count);
 
 /**
+ * @brief  定时器10ms嘀嗒函数，用于处理非阻塞闪烁
+ */
+void Alert_Tick10ms(void);
+
+/**
  * @brief  全部关闭（LED灭）
  */
 void Alert_AllOff(void);

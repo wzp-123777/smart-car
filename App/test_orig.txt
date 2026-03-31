@@ -1,0 +1,65 @@
+            } else {
+                // 目标转角为 180 度 (基于C点清零后的转角)
+                float target_turn_yaw = 180.0f;
+                float error = target_turn_yaw - abs_yaw;
+
+                // 确保误差为正（因为 abs_yaw 必然从 0 往 180 增加）
+                if (error < 0.0f) error = -error;
+
+                // 核心：2度死区判断
+                if (error <= 2.0f)
+                {
+                    // 刹车
+                    g_pid_left.target = 0;
+                    g_pid_right.target = 0;
+                    Motor_Stop();
+
+                    // 清空角度变化，去循迹到点B
+                    MPU6050_ResetYaw(&g_mpu_data);
+                    
+                    // 重置U-turn初始标志位以便以后重复执行
+                    u_turn_init = 0;
+                    
+                    t2_phase = 2;
+                    goto SKIP_PID;
+                }
+
+                // PID 计算旋转输出 (融入：动态Kp、Kd低通滤波、Ki=0)
+                static float last_error = 0.0f;
+                static float last_d = 0.0f;
+                static uint8_t u_turn_init = 0;
+                
+                // 第一帧进入时初始化状态
+                if (!u_turn_init) {
+                    last_error = error;
+                    last_d = 0.0f;
+                    u_turn_init = 1;
+                }
+
+                // 1. 线性动态Kp：基础 0.8，误差达到 180 时 Kp 大约 1.7
+                float Kp = 0.8f + 0.005f * error;
+                if (Kp > 2.0f) Kp = 2.0f;
+
+                // 2. Kd 与低通滤波：减少短时间噪声冲击
+                float Kd = 2.0f;
+                float alpha = 0.3f; // 滤波系数
+                float d_raw = error - last_error;
+                float d_filtered = alpha * d_raw + (1.0f - alpha) * last_d;
+                
+                last_d = d_filtered;
+                last_error = error;
+
+                // 3. 计算融合速度 (Ki=0 则不加入积分)。d_raw为负起到阻尼作用
+                float turn_speed = Kp * error + Kd * d_filtered;
+
+                // 限幅处理，防止动作过猛
+                if (turn_speed > 50.0f) turn_speed = 50.0f;
+                // 注意这里只取正速度往右转，原本您的例子有区分正负，但由于我们用的是 abs_yaw 和向右原地打转，所以基础速度限定正向补偿
+                if (turn_speed < 10.0f) turn_speed = 10.0f;
+
+                // 执行向右原地掉头转向 (左轮正传、右轮反转)
+                g_pid_left.target = turn_speed;
+                g_pid_right.target = -turn_speed;
+                
+                SKIP_PID:;
+            }

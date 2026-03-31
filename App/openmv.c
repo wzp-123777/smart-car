@@ -19,18 +19,15 @@ static void OpenMV_ParseTextLine(void)
 {
     s_rx_str[s_rx_str_idx] = '\0';
 
-    if ((strstr(s_rx_str, "Lighter") != NULL) || (strstr(s_rx_str, OPENMV_LABEL_LIGHTER) != NULL))
+    if (strstr(s_rx_str, "Lighter") != NULL || strstr(s_rx_str, "lighter") != NULL)
     {
         OpenMV_SetObject(OBJ_LIGHTER);
     }
-    else if ((strstr(s_rx_str, "Scissors") != NULL) ||
-             (strstr(s_rx_str, OPENMV_LABEL_SCISSORS) != NULL) ||
-             (strstr(s_rx_str, "Scissor") != NULL) ||
-             (strstr(s_rx_str, OPENMV_LABEL_SCISSOR) != NULL))
+    else if (strstr(s_rx_str, "Scissors") != NULL || strstr(s_rx_str, "scissors") != NULL)
     {
         OpenMV_SetObject(OBJ_SCISSORS);
     }
-    else if ((strstr(s_rx_str, "Hammer") != NULL) || (strstr(s_rx_str, OPENMV_LABEL_HAMMER) != NULL))
+    else if (strstr(s_rx_str, "Hammer") != NULL || strstr(s_rx_str, "hammer") != NULL)
     {
         OpenMV_SetObject(OBJ_HAMMER);
     }

@@ -106,15 +106,6 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
             Motor_Stop();
             SM_TransitionTo(sm, STATE_FINISHED);
         }
-
-        if (g_openmv_data.is_new)
-        {
-            OpenMV_DataTypeDef result = OpenMV_GetResult();
-            sm->detected_obj_id = result.object_id;
-            OpenMV_ClearNewFlag();
-            SYN6658_ReportPoint(sm->checkpoint_count);
-            SYN6658_ReportObject(sm->detected_obj_id);
-        }
         break;
 
     case STATE_TURN_LEFT:

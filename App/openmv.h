@@ -93,11 +93,4 @@ void OpenMV_ClearNewFlag(void);
  */
 uint32_t OpenMV_GetRxByteCount(void);
 
-/* Current Task3 model labels: background / hammer / lighter / scissors */
-#define OPENMV_LABEL_BACKGROUND "background"
-#define OPENMV_LABEL_HAMMER     "hammer"
-#define OPENMV_LABEL_LIGHTER    "lighter"
-#define OPENMV_LABEL_SCISSORS   "scissors"
-#define OPENMV_LABEL_SCISSOR    "scissor"
-
 #endif /* __OPENMV_H */

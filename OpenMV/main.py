@@ -9,7 +9,7 @@ import image
 from pyb import LED, UART
 
 
-MODEL_PATH = "trained.tflite"
+MODEL_CANDIDATES = ("trained", "trained.tflite")
 LABELS_PATH = "labels.txt"
 UART_PORT = 3
 UART_BAUDRATE = 115200
@@ -19,7 +19,6 @@ STARTUP_SUPPRESS_MS = 3000
 REQUIRED_STABLE_FRAMES = 2
 MAX_MISSED_FRAMES = 2
 WINDOW_SIZE = (240, 240)
-EXPECTED_LABELS = ("background", "hammer", "lighter", "scissors")
 
 COLORS = [
     (255, 0, 0),
@@ -46,11 +45,18 @@ OBJECT_IDS = {
 
 
 def load_model():
-    try:
-        load_to_fb = uos.stat(MODEL_PATH)[6] > (gc.mem_free() - (64 * 1024))
-        return ml.Model(MODEL_PATH, load_to_fb=load_to_fb)
-    except Exception as exc:
-        raise Exception('Failed to load "%s" (%s)' % (MODEL_PATH, exc))
+    last_error = None
+
+    for name in MODEL_CANDIDATES:
+        try:
+            if name.endswith(".tflite"):
+                load_to_fb = uos.stat(name)[6] > (gc.mem_free() - (64 * 1024))
+                return ml.Model(name, load_to_fb=load_to_fb)
+            return ml.Model(name)
+        except Exception as exc:
+            last_error = exc
+
+    raise Exception("Failed to load model (%s)" % last_error)
 
 
 def load_labels(model):
@@ -62,7 +68,7 @@ def load_labels(model):
     try:
         return list(model.labels)
     except Exception:
-        return list(EXPECTED_LABELS)
+        return ["background", "hammer", "lighter", "scissors"]
 
 
 def normalize_label(label_name):

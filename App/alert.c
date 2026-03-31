@@ -44,19 +44,32 @@ void Alert_LED_Toggle(void)
     GPIO_ToggleBits(LED_PORT, LED_PIN);
 }
 
+static volatile uint16_t g_alert_timer = 0;
+
+void Alert_Tick10ms(void)
+{
+    if (g_alert_timer > 0)
+    {
+        g_alert_timer--;
+        if (g_alert_timer == 0)
+        {
+            Alert_LED_Off();
+        }
+    }
+}
+
 /**
  * @brief  到达巡检点提示
- * @note   LED亮 → 持续duration_ms → 关闭
+ * @note   LED亮 → 持续duration_ms → 关闭 (非阻塞)
  */
 void Alert_Checkpoint(uint16_t duration_ms)
 {
     Alert_LED_On();
-    delay_ms(duration_ms);
-    Alert_LED_Off();
+    g_alert_timer = duration_ms / 10;
 }
 
 /**
- * @brief  错误报警（快速闪烁）
+ * @brief  错误报警（暂未做非阻塞，依然保留阻塞方便严重错误时停机查看）
  */
 void Alert_Error(uint8_t count)
 {
