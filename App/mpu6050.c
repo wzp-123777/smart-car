@@ -19,7 +19,7 @@ void MPU6050_ReadAll(MPU6050_DataTypeDef *data) {
     data->gyro_z = g_mpu_data_uart.gyro_z;
     data->gyro_z_dps = g_mpu_data_uart.gyro_z_dps;
 
-    // è§£åŒ…JY61çš„ç»å¯¹è§’åº¦å¹¶ç´¯åŠ ï¼Œé˜²æ­¢-180~180çªå˜å¯¼è‡´ä»»åŠ¡åˆ¤æ–­å¤±è´¥
+    // ½â°üJY61µÄ¾ø¶Ô½Ç¶È²¢ÀÛ¼Ó£¬·ÀÖ¹180~180Í»±äµ¼ÖÂÈÎÎñÅĞ¶ÏÊ§°Ü
     float current_raw_yaw = g_mpu_data_uart.yaw;
     float delta = current_raw_yaw - prev_raw_yaw;
     
@@ -38,7 +38,7 @@ void MPU6050_ReadAll(MPU6050_DataTypeDef *data) {
 }
 
 void MPU6050_UpdateYaw(MPU6050_DataTypeDef *data, float dt) { 
-    // ç•™ç©ºï¼Œä½¿ç”¨ä¸²å£ä¼ æ¥çš„è‡ªå¸¦ç»“ç®—ç»“æœå¹¶åœ¨ReadAllä¸­å¤„ç†ç´¯åŠ 
+    // Áô¿Õ£¬Ê¹ÓÃ´®¿Ú´«À´µÄ×Ô´ø½áËã½á¹û²¢ÔÚReadAllÖĞ´¦ÀíÀÛ¼Ó
 }
 
 void MPU6050_ResetYaw(MPU6050_DataTypeDef *data) {

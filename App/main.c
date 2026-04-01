@@ -1,25 +1,25 @@
 #pragma diag_suppress 177
 /**
 * @file    main.c
-* @brief   智能巡护小车主程序
-* @author  2026开发团队
+* @brief   智能巡护小车主程�?
+* @author  2026开发团�?
 * @note
-*   主控: STM32F407ZGT6 (标准库 SPL)
+*   主控: STM32F407ZGT6 (标准�?SPL)
 *   视觉: OpenMV H7 Plus (UART1, 115200, PB6=TX, PB7=RX)
 *   语音: SYN6658 (UART2, 9600, PA2=TX, PA3=RX)
-*   动力: 4路 N20 + 4路 TB6612FNG (TIM1 PWM, PA8~PA11)
-*   编码器: 左前=TIM2(PA0,PA1), 右前=TIM3(PA6,PA7)
-*   循迹: 5路红外 (PD1~PD5)
-*   姿态: MPU6050 (USART3, 115200, PB10=TX, PB11=RX)
+*   动力: 4�?N20 + 4�?TB6612FNG (TIM1 PWM, PA8~PA11)
+*   编码�? 左前=TIM2(PA0,PA1), 右前=TIM3(PA6,PA7)
+*   循迹: 5路红�?(PD1~PD5)
+*   姿�? MPU6050 (USART3, 115200, PB10=TX, PB11=RX)
 *   报警: 声光模块 (Alert_Init)
-*   PID定时器: TIM6 (10ms触发)
+*   PID定时�? TIM6 (10ms触发)
 *
-* 编程规范与说明:
-*   当前工程不使用 CubeMX 和 HAL 库。
-*   1. 采用标准外设库 CMSIS 和 STM32F4xx_StdPeriph_Driver。
-*   2. 用户代码在 App 目录下。
-*   3. 需定义 USE_STDPERIPH_DRIVER 宏。
-*   4. 避免使用 CubeMX 重新生成代码。
+* 编程规范与说�?
+*   当前工程不使�?CubeMX �?HAL 库�?
+*   1. 采用标准外设�?CMSIS �?STM32F4xx_StdPeriph_Driver�?
+*   2. 用户代码�?App 目录下�?
+*   3. 需定义 USE_STDPERIPH_DRIVER 宏�?
+*   4. 避免使用 CubeMX 重新生成代码�?
 */
 #include "stm32f4xx.h"
 #include "pid.h"
@@ -35,23 +35,23 @@
 /* ================================================================
 *                     全局变量定义
 * ================================================================ */
-/* PID 左右轮控制 */
+/* PID 左右轮控�?*/
 PID_TypeDef g_pid_left;
 PID_TypeDef g_pid_right;
 /* 转向 PID 控制 */
 PID_TypeDef g_pid_turn;
-/* 传感器数据 */
+/* 传感器数�?*/
 IR_DataTypeDef g_ir_data;
 /* MPU6050 数据 */
 MPU6050_DataTypeDef g_mpu_data;
 /* 状态机 */
 StateMachine_TypeDef g_state_machine;
-/* 编码器读数 */
+/* 编码器读�?*/
 volatile int16_t g_encoder_left  = 0;
 volatile int16_t g_encoder_right = 0;
 /* 基础速度 / 10ms 周期 */
 int16_t g_base_speed = 15;
-/* PID 计算后的 PWM 值 */
+/* PID 计算后的 PWM �?*/
 volatile float g_motor_left_pwm  = 0;
 volatile float g_motor_right_pwm = 0;
 /* 10ms 中断标志 */
@@ -67,6 +67,7 @@ static const char *g_line_debug_mode = "INIT";
 #define LINE_FOLLOW_LOOP_DELAY_MS    5U
 #define LINE_FOLLOW_GYRO_CAL_SAMPLES   12U
 #define LINE_FOLLOW_GYRO_CAL_DELAY_MS   5U
+#define LINE_FOLLOW_CROSS_SIDE_STEER   1U
 
 typedef struct {
     float target_straight;
@@ -80,37 +81,36 @@ typedef struct {
     float gyro_damp;
     float gyro_damp_max;
     float min_inner_speed;
-    uint8_t cross_side_steer;
 } LineFollowProfile_TypeDef;
 
 static const LineFollowProfile_TypeDef g_line_follow_default_profile = {
     35.0f, 30.0f, 25.0f, 0.0f, 20.0f,
     14.0f, 25.0f, 40.0f,
-    0.05f, 4.0f, -45.0f, 1U
+    0.05f, 4.0f, -45.0f
 };
 
 static const LineFollowProfile_TypeDef g_line_follow_task_profiles[5] = {
-    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f, 1U},
-    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f, 1U},
-    {32.0f, 28.0f, 24.0f, 0.0f, 18.0f, 13.0f, 23.0f, 36.0f, 0.05f, 4.0f, -40.0f, 1U},
-    {26.0f, 22.0f, 18.0f, 0.0f, 15.0f, 11.0f, 18.0f, 30.0f, 0.04f, 3.5f, -32.0f, 1U},
-    {38.0f, 33.0f, 27.0f, 0.0f, 22.0f, 16.0f, 28.0f, 44.0f, 0.06f, 4.0f, -48.0f, 1U}
+    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f},
+    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f},
+    {32.0f, 28.0f, 24.0f, 0.0f, 18.0f, 13.0f, 23.0f, 36.0f, 0.05f, 4.0f, -40.0f},
+    {26.0f, 22.0f, 18.0f, 0.0f, 15.0f, 11.0f, 18.0f, 30.0f, 0.04f, 3.5f, -32.0f},
+    {38.0f, 33.0f, 27.0f, 0.0f, 22.0f, 16.0f, 28.0f, 44.0f, 0.06f, 4.0f, -48.0f}
 };
 
 static LineFollowProfile_TypeDef g_line_follow_active_profile = {
     35.0f, 30.0f, 25.0f, 0.0f, 20.0f,
     14.0f, 25.0f, 40.0f,
-    0.05f, 4.0f, -45.0f, 1U
+    0.05f, 4.0f, -45.0f
 };
 /* ================================================================
-*                     系统滴答定时器函数 SysTick 相关
+*                     系统滴答定时器函�?SysTick 相关
 * ================================================================ */
 volatile uint32_t g_sys_tick = 0;
 uint32_t HAL_GetTick(void)
 {
 return g_sys_tick;
 }
-/* SysTick_Handler 在 stm32f4xx_it.c 中定义
+/* SysTick_Handler �?stm32f4xx_it.c 中定�?
 * 并在该函数中累加 g_sys_tick 变量
 */
 // void SysTick_Handler(void)
@@ -338,35 +338,27 @@ void LineFollow_RunByRawIR(void)
 
     if (turn_dir < 0)
     {
-        if (cfg->cross_side_steer != 0U)
-        {
-            /* 当前任务使用交叉侧减速：线在左侧时，压低右轮。 */
-            speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
-                                                cfg->min_inner_speed,
-                                                cfg->target_straight);
-        }
-        else
-        {
-            speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
-                                               cfg->min_inner_speed,
-                                               cfg->target_straight);
-        }
+#if LINE_FOLLOW_CROSS_SIDE_STEER
+        speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
+                                            cfg->min_inner_speed,
+                                            cfg->target_straight);
+#else
+        speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
+                                           cfg->min_inner_speed,
+                                           cfg->target_straight);
+#endif
     }
     else if (turn_dir > 0)
     {
-        if (cfg->cross_side_steer != 0U)
-        {
-            /* 当前任务使用交叉侧减速：线在右侧时，压低左轮。 */
-            speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
-                                               cfg->min_inner_speed,
-                                               cfg->target_straight);
-        }
-        else
-        {
-            speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
-                                                cfg->min_inner_speed,
-                                                cfg->target_straight);
-        }
+#if LINE_FOLLOW_CROSS_SIDE_STEER
+        speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
+                                           cfg->min_inner_speed,
+                                           cfg->target_straight);
+#else
+        speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
+                                            cfg->min_inner_speed,
+                                            cfg->target_straight);
+#endif
     }
 
     g_pid_left.target = speed_left;
@@ -378,7 +370,7 @@ void LineFollow_RunByRawIR(void)
 *                     ???????????? (??????)
 * ================================================================ */
 /**
-* @brief  TIM1 PWM 初始化 (频率 16.8kHz，消除电机滋滋声)
+* @brief  TIM1 PWM 初始�?(频率 16.8kHz，消除电机滋滋声)
 *         SYSCLK 168MHz / Prescaler 10 / Period 1000 = 16.8kHz
 *         PA8~PA11 (CH1~CH4)
 */
@@ -399,9 +391,9 @@ GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
 GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
 GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
 GPIO_Init(GPIOA, &GPIO_InitStructure);
-TIM_TimeBaseStructure.TIM_Prescaler = 10 - 1; // 由 168-1 改为 10-1，频率提升 16.8 倍
+TIM_TimeBaseStructure.TIM_Prescaler = 10 - 1; // �?168-1 改为 10-1，频率提�?16.8 �?
 TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-TIM_TimeBaseStructure.TIM_Period = 1000 - 1;  // 维持 1000 分辨率不变
+TIM_TimeBaseStructure.TIM_Period = 1000 - 1;  // 维持 1000 分辨率不�?
 TIM_TimeBaseStructure.TIM_ClockDivision = 0;
 TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
 TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStructure);
@@ -600,7 +592,7 @@ if(USART_GetFlagStatus(USART1, USART_FLAG_ORE) != RESET)
 USART_ReceiveData(USART1); /* 读数据寄存器清除ORE */
 }}
 /**
-* @brief  TIM6 中断服务函数：10ms执行一次PID计算和姿态更新
+* @brief  TIM6 中断服务函数�?0ms执行一次PID计算和姿态更�?
 */
 void TIM6_DAC_IRQHandler(void)
 {
@@ -611,18 +603,18 @@ void TIM6_DAC_IRQHandler(void)
     {
         TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
 
-        /* ===== 1. 获取部分传感器和编码器反馈值 ===== */
+        /* ===== 1. 获取部分传感器和编码器反馈�?===== */
         IR_Read(&g_ir_data);
         g_encoder_left  = Encoder_Read_TIM2();
         g_encoder_right = Encoder_Read_TIM3();
 
-        /* ===== 2. MPU6050 姿态结算 ===== */
-        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt为0.01s
+        /* ===== 2. MPU6050 姿态结�?===== */
+        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt�?.01s
 
-        /* ===== 3. 更新声光定时器 (非阻塞) ===== */
+        /* ===== 3. 更新声光定时�?(非阻�? ===== */
         Alert_Tick10ms();
 
-        /* ===== 4. 强制保护10ms控制周期的循迹更新 ===== */
+        /* ===== 4. 强制保护10ms控制周期的循迹更�?===== */
         if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
             LineFollow_RunByRawIR();
@@ -653,7 +645,7 @@ void TIM6_DAC_IRQHandler(void)
         Motor_SetLeft((int16_t)pwm_left);
         Motor_SetRight((int16_t)pwm_right);
 
-        /* 发送事件标志给主循环 */
+        /* 发送事件标志给主循�?*/
         g_flag_10ms = 1;
     }
 }
@@ -666,27 +658,6 @@ void TIM6_DAC_IRQHandler(void)
 */
 CarEvent_TypeDef DetectEvent(void)
 {
-    static uint32_t last_speak_time = 0;
-    static uint8_t  last_object_id = 0;
-
-    if (OpenMV_HasNewData())
-    {
-        OpenMV_DataTypeDef result = OpenMV_GetResult();
-        OpenMV_ClearNewFlag();
-
-        if (result.is_valid && result.object_id != 0)
-        {
-            uint32_t current_time = HAL_GetTick();
-            
-            /* 如果是新物体，或者距离上次播报同一个物体已经超过3000ms，则播报 */
-            if ((result.object_id != last_object_id) || (current_time - last_speak_time > 3000))
-            {
-                SYN6658_ReportObject(result.object_id);
-                last_object_id = result.object_id;
-                last_speak_time = current_time;
-            }
-        }
-    }
     return EVENT_NONE;
 }
 /* ================================================================
@@ -732,7 +703,7 @@ return 0;
 /* ==================== 语音播报 GBK 编码 ==================== */
 #define TTS_PLEASE_SELECT     "\xC7\xEB\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "请选择任务"
 #define TTS_NO_TASK_SELECTED  "\xCE\xB4\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "未选择任务"
-#define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执行"
+#define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执�?
 
 // "任务1" ... "任务4"的GBK
 char* TASK_NAMES[5] = {
@@ -752,7 +723,7 @@ char* ENTER_TASK_NAMES[5] = {
     "\xBD\xF8\xC8\xEB\xC8\xCE\xCE\xF1\x34"
 };
 
-/* ==================== 系统调度状态 ==================== */
+/* ==================== 系统调度状�?==================== */
 typedef enum {
     SYS_STATE_TASK_SELECT = 0,
     SYS_STATE_TASK_RUNNING
@@ -862,16 +833,16 @@ delay_ms(1000);
 /* ?????????NVIC????????????? */
 NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 /* ????????????? */
-MX_TIM1_PWM_Init();           // 定时器1 PWM (PA8~PA11)
+MX_TIM1_PWM_Init();           // 定时�? PWM (PA8~PA11)
 Motor_GPIO_Init();            // 电机引脚/接口
 
     /* 闭环必须：使能编码器与定时器 */
     MX_TIM2_Encoder_Init();
     MX_TIM3_Encoder_Init();
-    MX_TIM6_Init();               // 核心计算定时器 (10ms)
+    MX_TIM6_Init();               // 核心计算定时�?(10ms)
     
-    /* 速度环PID参数初始化 (Kp, Ki, Kd, OutMax, OutMin) */
-    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭矩 */
+    /* 速度环PID参数初始�?(Kp, Ki, Kd, OutMax, OutMin) */
+    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭�?*/
     PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
     PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
     LineFollow_UseDefaultProfile();
@@ -879,11 +850,11 @@ Motor_GPIO_Init();            // 电机引脚/接口
     MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
 MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
 SYN6658_Init();               // ???????????
-OpenMV_Init();                // OpenMV 初始化
-IR_Init();                    // 5路红外模块
+OpenMV_Init();                // OpenMV 初始�?
+IR_Init();                    // 5路红外模�?
 MX_USART3_Init();             // MPU6050模块串口
 MPU6050_Init();               // 串口MPU数据接口
-Alert_Init();                 // 声光报警初始化
+Alert_Init();                 // 声光报警初始�?
 StartButton_Init();           // 初始化PA15作为启动按键
 
 /* ====== 上电完成提示 ====== */
