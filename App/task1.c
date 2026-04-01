@@ -104,6 +104,373 @@ static void Task_RunBasicLineFollow(uint8_t task_id)
     }
 }
 
+#define TASK2_DIAGONAL_ANGLE_OFFSET_AC        41.0f
+#define TASK2_DIAGONAL_ANGLE_OFFSET_BD        41.0f
+#define TASK2_DIAGONAL_MIN_TRAVEL_PULSE       1200
+#define TASK2_DIAGONAL_ASSIST_PULSE           0
+#define TASK2_DIAGONAL_FINISH_PULSE           8100
+#define TASK2_DIAGONAL_FINISH_PULSE_BD        6000
+#define TASK2_DIAGONAL_PULSE_LIMIT            9300
+#define TASK2_DIAGONAL_BASE_SPEED             28.0f
+#define TASK2_DIAGONAL_MAX_CORRECTION         10.0f
+#define TASK2_DIAGONAL_IR_GAIN                 0.35f
+#define TASK2_DIAGONAL_IR_MAX                  8.0f
+#define TASK2_ALIGN_TOLERANCE_DEG              8.0f
+#define TASK2_ALIGN_TURN_MAX                  22.0f
+#define TASK2_ALIGN_TURN_MIN                   8.0f
+#define TASK2_ALIGN_STABLE_COUNT               6U
+#define TASK2_ALIGN_TIMEOUT_LOOPS           400U
+#define TASK2_STRAIGHT_CAPTURE_TOLERANCE_DEG  10.0f
+#define TASK2_STRAIGHT_CAPTURE_STABLE_COUNT    5U
+#define TASK2_ARC_FINISH_YAW_DELTA           175.0f
+#define TASK2_CB_ARC_FINISH_YAW_DELTA        167.0f
+#define TASK2_CB_ALIGN_TOLERANCE_DEG           2.0f
+#define TASK2_DA_ARC_TARGET_YAW_DELTA       178.0f
+#define TASK2_DA_ARC_TOLERANCE_DEG            2.0f
+
+static float Task2_AbsFloat(float value)
+{
+    if (value < 0.0f)
+    {
+        return -value;
+    }
+
+    return value;
+}
+
+static float Task2_ClampFloat(float value, float min_value, float max_value)
+{
+    if (value < min_value)
+    {
+        return min_value;
+    }
+
+    if (value > max_value)
+    {
+        return max_value;
+    }
+
+    return value;
+}
+
+static float Task2_NormalizeDelta(float delta)
+{
+    while (delta > 180.0f)
+    {
+        delta -= 360.0f;
+    }
+
+    while (delta < -180.0f)
+    {
+        delta += 360.0f;
+    }
+
+    return delta;
+}
+
+static int32_t Task2_GetPulseStep(void)
+{
+    int32_t left = g_encoder_left;
+    int32_t right = g_encoder_right;
+
+    if (left < 0)
+    {
+        left = -left;
+    }
+
+    if (right < 0)
+    {
+        right = -right;
+    }
+
+    return (left + right) / 2;
+}
+
+static uint8_t Task2_LineDetected(void)
+{
+    return (g_ir_data.raw_byte != 0U) ? 1U : 0U;
+}
+
+static void Task2_StopMotion(uint32_t settle_ms)
+{
+    g_pid_left.target = 0.0f;
+    g_pid_right.target = 0.0f;
+    PID_Reset(&g_pid_left);
+    PID_Reset(&g_pid_right);
+    Motor_Stop();
+
+    if (settle_ms > 0U)
+    {
+        delay_ms(settle_ms);
+    }
+}
+
+static void Task2_SetManualTargets(float left_target, float right_target)
+{
+    g_pid_left.target = left_target;
+    g_pid_right.target = right_target;
+}
+
+static void Task2_ManualServiceLoop(void)
+{
+    MPU6050_ReadAll(&g_mpu_data);
+    Tick_LED_PC13();
+    delay_ms(10);
+}
+
+static void Task2_LineFollowServiceLoop(void)
+{
+    MPU6050_ReadAll(&g_mpu_data);
+    Debug_LogIR(EVENT_NONE);
+    Tick_LED_PC13();
+    delay_ms(10);
+}
+
+static void Task2_AlignToHeadingEx(float target_heading, float tolerance_deg)
+{
+    uint32_t stable_count = 0U;
+    uint32_t loop_count = 0U;
+
+    g_state_machine.current_state = STATE_IDLE;
+
+    while (loop_count < TASK2_ALIGN_TIMEOUT_LOOPS)
+    {
+        float yaw_error;
+        float turn_cmd;
+
+        Task2_ManualServiceLoop();
+        yaw_error = Task2_NormalizeDelta(target_heading - g_mpu_data.yaw);
+
+        if (Task2_AbsFloat(yaw_error) <= tolerance_deg)
+        {
+            stable_count++;
+            Task2_SetManualTargets(0.0f, 0.0f);
+
+            if (stable_count >= TASK2_ALIGN_STABLE_COUNT)
+            {
+                break;
+            }
+        }
+        else
+        {
+            stable_count = 0U;
+            turn_cmd = yaw_error * 0.85f;
+
+            if (turn_cmd > 0.0f)
+            {
+                turn_cmd = Task2_ClampFloat(turn_cmd, TASK2_ALIGN_TURN_MIN, TASK2_ALIGN_TURN_MAX);
+            }
+            else
+            {
+                turn_cmd = Task2_ClampFloat(turn_cmd, -TASK2_ALIGN_TURN_MAX, -TASK2_ALIGN_TURN_MIN);
+            }
+
+            Task2_SetManualTargets(-turn_cmd, turn_cmd);
+        }
+
+        loop_count++;
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
+
+static void Task2_AlignToHeading(float target_heading)
+{
+    Task2_AlignToHeadingEx(target_heading, TASK2_ALIGN_TOLERANCE_DEG);
+}
+
+static uint8_t Task2_Center234Off(void)
+{
+    return ((g_ir_data.sensor[1] == 0U) &&
+            (g_ir_data.sensor[2] == 0U) &&
+            (g_ir_data.sensor[3] == 0U)) ? 1U : 0U;
+}
+
+static void Task2_ReachPointFromDiagonal(float diagonal_heading, float straight_heading, int32_t finish_pulse)
+{
+    int32_t total_pulse = 0;
+    uint8_t start_line_cleared = 0U;
+
+    g_state_machine.current_state = STATE_IDLE;
+
+    while (1)
+    {
+        float yaw_error;
+        float correction;
+        float left_target;
+        float right_target;
+
+        Task2_ManualServiceLoop();
+        total_pulse += Task2_GetPulseStep();
+
+        yaw_error = Task2_NormalizeDelta(diagonal_heading - g_mpu_data.yaw);
+        correction = (yaw_error * 0.60f) - (g_mpu_data.gyro_z_dps * 0.05f);
+        correction = Task2_ClampFloat(correction,
+                                      -TASK2_DIAGONAL_MAX_CORRECTION,
+                                      TASK2_DIAGONAL_MAX_CORRECTION);
+
+        left_target = TASK2_DIAGONAL_BASE_SPEED - correction;
+        right_target = TASK2_DIAGONAL_BASE_SPEED + correction;
+        Task2_SetManualTargets(left_target, right_target);
+
+        if ((total_pulse >= TASK2_DIAGONAL_MIN_TRAVEL_PULSE) && (Task2_LineDetected() == 0U))
+        {
+            start_line_cleared = 1U;
+        }
+
+        if ((total_pulse >= finish_pulse) ||
+            ((start_line_cleared != 0U) && (Task2_LineDetected() != 0U)))
+        {
+            break;
+        }
+
+        if (total_pulse >= TASK2_DIAGONAL_PULSE_LIMIT)
+        {
+            break;
+        }
+    }
+
+    Task2_StopMotion(60U);
+    Task2_AlignToHeading(straight_heading);
+}
+
+static void Task2_ReachPointFromDiagonal_BD(float diagonal_heading, float straight_heading, int32_t finish_pulse)
+{
+    int32_t total_pulse = 0;
+    uint8_t start_line_cleared = 0U;
+
+    (void)straight_heading;
+    g_state_machine.current_state = STATE_IDLE;
+
+    while (1)
+    {
+        float yaw_error;
+        float correction;
+        float left_target;
+        float right_target;
+
+        Task2_ManualServiceLoop();
+        total_pulse += Task2_GetPulseStep();
+
+        yaw_error = Task2_NormalizeDelta(diagonal_heading - g_mpu_data.yaw);
+        correction = (yaw_error * 0.60f) - (g_mpu_data.gyro_z_dps * 0.05f);
+        correction = Task2_ClampFloat(correction,
+                                      -TASK2_DIAGONAL_MAX_CORRECTION,
+                                      TASK2_DIAGONAL_MAX_CORRECTION);
+
+        left_target = TASK2_DIAGONAL_BASE_SPEED - correction;
+        right_target = TASK2_DIAGONAL_BASE_SPEED + correction;
+        Task2_SetManualTargets(left_target, right_target);
+
+        if ((total_pulse >= TASK2_DIAGONAL_MIN_TRAVEL_PULSE) && (Task2_LineDetected() == 0U))
+        {
+            start_line_cleared = 1U;
+        }
+
+        if ((total_pulse >= finish_pulse) ||
+            ((start_line_cleared != 0U) && (Task2_LineDetected() != 0U)))
+        {
+            break;
+        }
+
+        if (total_pulse >= TASK2_DIAGONAL_PULSE_LIMIT)
+        {
+            break;
+        }
+    }
+
+    Task2_StopMotion(0U);
+}
+
+static void Task2_FollowArcUntilYawDelta(float finish_delta_deg)
+{
+    float start_yaw;
+
+    g_state_machine.current_state = STATE_LINE_FOLLOW;
+    start_yaw = g_mpu_data.yaw;
+
+    while (1)
+    {
+        float yaw_delta;
+
+        Task2_LineFollowServiceLoop();
+        yaw_delta = Task2_NormalizeDelta(g_mpu_data.yaw - start_yaw);
+
+        if (Task2_AbsFloat(yaw_delta) >= finish_delta_deg)
+        {
+            break;
+        }
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
+static void Task2_FollowArcUntilYawWindow(float target_delta_deg, float tolerance_deg)
+{
+    float start_yaw;
+    uint8_t stable_count = 0U;
+
+    g_state_machine.current_state = STATE_LINE_FOLLOW;
+    start_yaw = g_mpu_data.yaw;
+
+    while (1)
+    {
+        float yaw_delta;
+        float yaw_error;
+
+        Task2_LineFollowServiceLoop();
+        yaw_delta = Task2_AbsFloat(Task2_NormalizeDelta(g_mpu_data.yaw - start_yaw));
+        yaw_error = Task2_AbsFloat(yaw_delta - target_delta_deg);
+
+        if (yaw_error <= tolerance_deg)
+        {
+            stable_count++;
+            if (stable_count >= TASK2_STRAIGHT_CAPTURE_STABLE_COUNT)
+            {
+                break;
+            }
+        }
+        else
+        {
+            stable_count = 0U;
+        }
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
+
+static void Task2_FollowUntilAbsoluteYaw(float target_yaw, float tolerance_deg)
+{
+    uint8_t stable_count = 0U;
+
+    g_state_machine.current_state = STATE_LINE_FOLLOW;
+
+    while (1)
+    {
+        float yaw_error;
+
+        Task2_LineFollowServiceLoop();
+        yaw_error = Task2_NormalizeDelta(target_yaw - g_mpu_data.yaw);
+
+        if (Task2_AbsFloat(yaw_error) <= tolerance_deg)
+        {
+            stable_count++;
+            if (stable_count >= TASK2_STRAIGHT_CAPTURE_STABLE_COUNT)
+            {
+                break;
+            }
+        }
+        else
+        {
+            stable_count = 0U;
+        }
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
 void Task1_Run(void)
 {
     int32_t total_pulse = 0;
@@ -194,9 +561,38 @@ void Task1_Run(void)
 
 void Task2_Run(void)
 {
-    Task_RunBasicLineFollow(2U);
-}
+    float first_diagonal_heading = -TASK2_DIAGONAL_ANGLE_OFFSET_AC;
+    float second_diagonal_heading = 180.0f + TASK2_DIAGONAL_ANGLE_OFFSET_BD;
 
+    TurnOn_LED_PC13();
+    delay_ms(500);
+    Task_LineFollowEnter(2U, 3U);
+    Task2_StopMotion(150U);
+
+    Task2_AlignToHeading(first_diagonal_heading);
+    Task2_ReachPointFromDiagonal(first_diagonal_heading, 0.0f, TASK2_DIAGONAL_FINISH_PULSE);
+    SYN6658_ReportStation('C');
+    TurnOn_LED_PC13();
+
+    Task2_FollowUntilAbsoluteYaw(TASK2_CB_ARC_FINISH_YAW_DELTA, TASK2_CB_ALIGN_TOLERANCE_DEG);
+    SYN6658_ReportStation('B');
+    TurnOn_LED_PC13();
+
+    Task2_AlignToHeadingEx(180.0f, TASK2_CB_ALIGN_TOLERANCE_DEG);
+    Task2_AlignToHeading(second_diagonal_heading);
+    Task2_ReachPointFromDiagonal_BD(second_diagonal_heading, 180.0f, TASK2_DIAGONAL_FINISH_PULSE_BD);
+    Task2_FollowUntilAbsoluteYaw(180.0f, TASK2_CB_ALIGN_TOLERANCE_DEG);
+    Task2_AlignToHeadingEx(180.0f, TASK2_CB_ALIGN_TOLERANCE_DEG);
+    SYN6658_ReportStation('D');
+    TurnOn_LED_PC13();
+
+    Task2_FollowArcUntilYawWindow(TASK2_DA_ARC_TARGET_YAW_DELTA, TASK2_DA_ARC_TOLERANCE_DEG);
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+    SYN6658_ReportStation('A');
+    TurnOn_LED_PC13();
+    Task_StopAndHold();
+}
 static uint8_t Task3_GetPointIndex(char point)
 {
     switch (point)
@@ -396,3 +792,4 @@ void Task4_Run(void)
 {
     Task_RunBasicLineFollow(4U);
 }
+
