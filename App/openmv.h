@@ -48,6 +48,7 @@ typedef struct {
 extern volatile OpenMV_DataTypeDef g_openmv_data;
 extern uint8_t g_openmv_rx_buf[OPENMV_RX_BUF_SIZE];
 extern uint8_t g_openmv_rx_index;
+extern volatile uint32_t g_openmv_rx_byte_count;
 
 /* ==================== 函数声明 ==================== */
 
@@ -85,5 +86,18 @@ uint8_t OpenMV_HasNewData(void);
  * @brief  清除新数据标志
  */
 void OpenMV_ClearNewFlag(void);
+
+/**
+ * @brief  获取当前累计接收到的 OpenMV 串口字节数
+ * @retval 字节计数
+ */
+uint32_t OpenMV_GetRxByteCount(void);
+
+/* Current Task3 model labels: background / hammer / lighter / scissors */
+#define OPENMV_LABEL_BACKGROUND "background"
+#define OPENMV_LABEL_HAMMER     "hammer"
+#define OPENMV_LABEL_LIGHTER    "lighter"
+#define OPENMV_LABEL_SCISSORS   "scissors"
+#define OPENMV_LABEL_SCISSOR    "scissor"
 
 #endif /* __OPENMV_H */

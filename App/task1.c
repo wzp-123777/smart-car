@@ -1,4 +1,4 @@
-#include "task.h"
+﻿#include "task.h"
 #include "state_machine.h"
 
 #include "encoder.h"
@@ -104,11 +104,11 @@ static void Task_RunBasicLineFollow(uint8_t task_id)
     }
 }
 
-#define TASK2_DIAGONAL_ANGLE_OFFSET_AC        41.0f
+#define TASK2_DIAGONAL_ANGLE_OFFSET_AC        39.0f
 #define TASK2_DIAGONAL_ANGLE_OFFSET_BD        41.0f
 #define TASK2_DIAGONAL_MIN_TRAVEL_PULSE       1200
 #define TASK2_DIAGONAL_ASSIST_PULSE           0
-#define TASK2_DIAGONAL_FINISH_PULSE           8100
+#define TASK2_DIAGONAL_FINISH_PULSE           7900
 #define TASK2_DIAGONAL_FINISH_PULSE_BD        6000
 #define TASK2_DIAGONAL_PULSE_LIMIT            9300
 #define TASK2_DIAGONAL_BASE_SPEED             28.0f
@@ -681,6 +681,299 @@ static void Task3_ReportPointResult(char point, uint8_t *object_slot)
     }
 }
 
+static void Task4_RememberTargetObject(char target_point, uint8_t remembered_object[4])
+{
+    OpenMV_DataTypeDef mv;
+    uint8_t point_index;
+
+    if (OpenMV_HasNewData() == 0U)
+    {
+        return;
+    }
+
+    mv = OpenMV_GetResult();
+    point_index = Task3_GetPointIndex(target_point);
+
+    if ((mv.is_valid != 0U) &&
+        (mv.object_id >= OBJ_LIGHTER) &&
+        (mv.object_id <= OBJ_HAMMER) &&
+        (remembered_object[point_index] == 0U))
+    {
+        remembered_object[point_index] = mv.object_id;
+        TurnOn_LED_PC13();
+    }
+
+    OpenMV_ClearNewFlag();
+}
+
+static void Task4_ManualServiceLoop(uint8_t remembered_object[4], char target_point)
+{
+    Task2_ManualServiceLoop();
+    Task4_RememberTargetObject(target_point, remembered_object);
+}
+
+static void Task4_LineFollowServiceLoop(uint8_t remembered_object[4], char target_point)
+{
+    Task2_LineFollowServiceLoop();
+    Task4_RememberTargetObject(target_point, remembered_object);
+}
+
+static void Task4_ReportPointResult(char point, uint8_t *object_slot)
+{
+    Task2_StopMotion(60U);
+
+    if (*object_slot != 0U)
+    {
+        Task3_SpeakPointObject(point, *object_slot);
+        *object_slot = 0U;
+    }
+    else
+    {
+        SYN6658_ReportStation(point);
+    }
+}
+
+static void Task4_AlignToHeadingEx(float target_heading,
+                                   float tolerance_deg,
+                                   uint8_t remembered_object[4],
+                                   char target_point)
+{
+    uint32_t stable_count = 0U;
+    uint32_t loop_count = 0U;
+
+    g_state_machine.current_state = STATE_IDLE;
+
+    while (loop_count < TASK2_ALIGN_TIMEOUT_LOOPS)
+    {
+        float yaw_error;
+        float turn_cmd;
+
+        Task4_ManualServiceLoop(remembered_object, target_point);
+        yaw_error = Task2_NormalizeDelta(target_heading - g_mpu_data.yaw);
+
+        if (Task2_AbsFloat(yaw_error) <= tolerance_deg)
+        {
+            stable_count++;
+            Task2_SetManualTargets(0.0f, 0.0f);
+
+            if (stable_count >= TASK2_ALIGN_STABLE_COUNT)
+            {
+                break;
+            }
+        }
+        else
+        {
+            stable_count = 0U;
+            turn_cmd = yaw_error * 0.85f;
+
+            if (turn_cmd > 0.0f)
+            {
+                turn_cmd = Task2_ClampFloat(turn_cmd,
+                                            TASK2_ALIGN_TURN_MIN,
+                                            TASK2_ALIGN_TURN_MAX);
+            }
+            else
+            {
+                turn_cmd = Task2_ClampFloat(turn_cmd,
+                                            -TASK2_ALIGN_TURN_MAX,
+                                            -TASK2_ALIGN_TURN_MIN);
+            }
+
+            Task2_SetManualTargets(-turn_cmd, turn_cmd);
+        }
+
+        loop_count++;
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
+
+static void Task4_AlignToHeading(float target_heading,
+                                 uint8_t remembered_object[4],
+                                 char target_point)
+{
+    Task4_AlignToHeadingEx(target_heading,
+                           TASK2_ALIGN_TOLERANCE_DEG,
+                           remembered_object,
+                           target_point);
+}
+
+static void Task4_ReachPointFromDiagonal(float diagonal_heading,
+                                         float straight_heading,
+                                         int32_t finish_pulse,
+                                         uint8_t remembered_object[4],
+                                         char target_point)
+{
+    int32_t total_pulse = 0;
+    uint8_t start_line_cleared = 0U;
+
+    g_state_machine.current_state = STATE_IDLE;
+
+    while (1)
+    {
+        float yaw_error;
+        float correction;
+        float left_target;
+        float right_target;
+
+        Task4_ManualServiceLoop(remembered_object, target_point);
+        total_pulse += Task2_GetPulseStep();
+
+        yaw_error = Task2_NormalizeDelta(diagonal_heading - g_mpu_data.yaw);
+        correction = (yaw_error * 0.60f) - (g_mpu_data.gyro_z_dps * 0.05f);
+        correction = Task2_ClampFloat(correction,
+                                      -TASK2_DIAGONAL_MAX_CORRECTION,
+                                      TASK2_DIAGONAL_MAX_CORRECTION);
+
+        left_target = TASK2_DIAGONAL_BASE_SPEED - correction;
+        right_target = TASK2_DIAGONAL_BASE_SPEED + correction;
+        Task2_SetManualTargets(left_target, right_target);
+
+        if ((total_pulse >= TASK2_DIAGONAL_MIN_TRAVEL_PULSE) && (Task2_LineDetected() == 0U))
+        {
+            start_line_cleared = 1U;
+        }
+
+        if ((total_pulse >= finish_pulse) ||
+            ((start_line_cleared != 0U) && (Task2_LineDetected() != 0U)))
+        {
+            break;
+        }
+
+        if (total_pulse >= TASK2_DIAGONAL_PULSE_LIMIT)
+        {
+            break;
+        }
+    }
+
+    Task2_StopMotion(60U);
+    Task4_AlignToHeading(straight_heading, remembered_object, target_point);
+}
+
+static void Task4_ReachPointFromDiagonal_BD(float diagonal_heading,
+                                            float straight_heading,
+                                            int32_t finish_pulse,
+                                            uint8_t remembered_object[4],
+                                            char target_point)
+{
+    int32_t total_pulse = 0;
+    uint8_t start_line_cleared = 0U;
+
+    (void)straight_heading;
+    g_state_machine.current_state = STATE_IDLE;
+
+    while (1)
+    {
+        float yaw_error;
+        float correction;
+        float left_target;
+        float right_target;
+
+        Task4_ManualServiceLoop(remembered_object, target_point);
+        total_pulse += Task2_GetPulseStep();
+
+        yaw_error = Task2_NormalizeDelta(diagonal_heading - g_mpu_data.yaw);
+        correction = (yaw_error * 0.60f) - (g_mpu_data.gyro_z_dps * 0.05f);
+        correction = Task2_ClampFloat(correction,
+                                      -TASK2_DIAGONAL_MAX_CORRECTION,
+                                      TASK2_DIAGONAL_MAX_CORRECTION);
+
+        left_target = TASK2_DIAGONAL_BASE_SPEED - correction;
+        right_target = TASK2_DIAGONAL_BASE_SPEED + correction;
+        Task2_SetManualTargets(left_target, right_target);
+
+        if ((total_pulse >= TASK2_DIAGONAL_MIN_TRAVEL_PULSE) && (Task2_LineDetected() == 0U))
+        {
+            start_line_cleared = 1U;
+        }
+
+        if ((total_pulse >= finish_pulse) ||
+            ((start_line_cleared != 0U) && (Task2_LineDetected() != 0U)))
+        {
+            break;
+        }
+
+        if (total_pulse >= TASK2_DIAGONAL_PULSE_LIMIT)
+        {
+            break;
+        }
+    }
+
+    Task2_StopMotion(0U);
+}
+
+static void Task4_FollowArcUntilYawWindow(float target_delta_deg,
+                                          float tolerance_deg,
+                                          uint8_t remembered_object[4],
+                                          char target_point)
+{
+    float start_yaw;
+    uint8_t stable_count = 0U;
+
+    g_state_machine.current_state = STATE_LINE_FOLLOW;
+    start_yaw = g_mpu_data.yaw;
+
+    while (1)
+    {
+        float yaw_delta;
+        float yaw_error;
+
+        Task4_LineFollowServiceLoop(remembered_object, target_point);
+        yaw_delta = Task2_AbsFloat(Task2_NormalizeDelta(g_mpu_data.yaw - start_yaw));
+        yaw_error = Task2_AbsFloat(yaw_delta - target_delta_deg);
+
+        if (yaw_error <= tolerance_deg)
+        {
+            stable_count++;
+            if (stable_count >= TASK2_STRAIGHT_CAPTURE_STABLE_COUNT)
+            {
+                break;
+            }
+        }
+        else
+        {
+            stable_count = 0U;
+        }
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
+
+static void Task4_FollowUntilAbsoluteYaw(float target_yaw,
+                                         float tolerance_deg,
+                                         uint8_t remembered_object[4],
+                                         char target_point)
+{
+    uint8_t stable_count = 0U;
+
+    g_state_machine.current_state = STATE_LINE_FOLLOW;
+
+    while (1)
+    {
+        float yaw_error;
+
+        Task4_LineFollowServiceLoop(remembered_object, target_point);
+        yaw_error = Task2_NormalizeDelta(target_yaw - g_mpu_data.yaw);
+
+        if (Task2_AbsFloat(yaw_error) <= tolerance_deg)
+        {
+            stable_count++;
+            if (stable_count >= TASK2_STRAIGHT_CAPTURE_STABLE_COUNT)
+            {
+                break;
+            }
+        }
+        else
+        {
+            stable_count = 0U;
+        }
+    }
+
+    g_state_machine.current_state = STATE_IDLE;
+    Task2_StopMotion(80U);
+}
 void Task3_Run(void)
 {
     int32_t total_pulse = 0;
@@ -790,6 +1083,60 @@ void Task3_Run(void)
 }
 void Task4_Run(void)
 {
-    Task_RunBasicLineFollow(4U);
+    float first_diagonal_heading = -TASK2_DIAGONAL_ANGLE_OFFSET_AC;
+    float second_diagonal_heading = 180.0f + TASK2_DIAGONAL_ANGLE_OFFSET_BD;
+    uint8_t remembered_object[4] = {0U, 0U, 0U, 0U};
+
+    TurnOn_LED_PC13();
+    delay_ms(500);
+    Task_LineFollowEnter(4U, 3U);
+    Task2_StopMotion(150U);
+    OpenMV_ClearNewFlag();
+
+    Task4_AlignToHeading(first_diagonal_heading, remembered_object, 'C');
+    Task4_ReachPointFromDiagonal(first_diagonal_heading,
+                                 0.0f,
+                                 TASK2_DIAGONAL_FINISH_PULSE,
+                                 remembered_object,
+                                 'C');
+    TurnOn_LED_PC13();
+    Task4_ReportPointResult('C', &remembered_object[Task3_GetPointIndex('C')]);
+
+    Task4_FollowUntilAbsoluteYaw(TASK2_CB_ARC_FINISH_YAW_DELTA,
+                                 TASK2_CB_ALIGN_TOLERANCE_DEG,
+                                 remembered_object,
+                                 'B');
+    TurnOn_LED_PC13();
+    Task4_ReportPointResult('B', &remembered_object[Task3_GetPointIndex('B')]);
+
+    Task4_AlignToHeadingEx(180.0f,
+                           TASK2_CB_ALIGN_TOLERANCE_DEG,
+                           remembered_object,
+                           'D');
+    Task4_AlignToHeading(second_diagonal_heading, remembered_object, 'D');
+    Task4_ReachPointFromDiagonal_BD(second_diagonal_heading,
+                                    180.0f,
+                                    TASK2_DIAGONAL_FINISH_PULSE_BD,
+                                    remembered_object,
+                                    'D');
+    Task4_FollowUntilAbsoluteYaw(180.0f,
+                                 TASK2_CB_ALIGN_TOLERANCE_DEG,
+                                 remembered_object,
+                                 'D');
+    Task4_AlignToHeadingEx(180.0f,
+                           TASK2_CB_ALIGN_TOLERANCE_DEG,
+                           remembered_object,
+                           'D');
+    TurnOn_LED_PC13();
+    Task4_ReportPointResult('D', &remembered_object[Task3_GetPointIndex('D')]);
+
+    Task4_FollowArcUntilYawWindow(TASK2_DA_ARC_TARGET_YAW_DELTA,
+                                  TASK2_DA_ARC_TOLERANCE_DEG,
+                                  remembered_object,
+                                  'A');
+    g_state_machine.current_state = STATE_IDLE;
+    TurnOn_LED_PC13();
+    Task4_ReportPointResult('A', &remembered_object[Task3_GetPointIndex('A')]);
+    Task_StopAndHold();
 }
 
