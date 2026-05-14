@@ -9,16 +9,40 @@ import image
 from pyb import LED, UART
 
 
-MODEL_CANDIDATES = ("trained", "trained.tflite")
+MODEL_PATH = "trained.tflite"
 LABELS_PATH = "labels.txt"
 UART_PORT = 3
 UART_BAUDRATE = 115200
 MIN_CONFIDENCE = 0.90
+CLASS_MIN_CONFIDENCE = {
+    "hammer": 0.90,
+    "lighter": 0.45,
+    "scissors": 0.60,
+}
 SEND_INTERVAL_MS = 1200
 STARTUP_SUPPRESS_MS = 3000
 REQUIRED_STABLE_FRAMES = 2
 MAX_MISSED_FRAMES = 2
+DEBUG_SCORE_PRINT_INTERVAL_MS = 200
+MIN_SCORE_GAP = 0.12
+CLASS_SCORE_BIAS = {
+    "hammer": 0.00,
+    "lighter": 0.08,
+    "scissors": 0.00,
+}
+CLASS_MIN_SCORE_GAP = {
+    "hammer": 0.12,
+    "lighter": 0.04,
+    "scissors": 0.12,
+}
+CLASS_REQUIRED_STABLE_FRAMES = {
+    "hammer": 2,
+    "lighter": 1,
+    "scissors": 1,
+}
 WINDOW_SIZE = (240, 240)
+EXPECTED_LABELS = ("background", "hammer", "lighter", "scissors")
+DETECTION_LABELS = ("hammer", "lighter", "scissors")
 
 COLORS = [
     (255, 0, 0),
@@ -44,19 +68,16 @@ OBJECT_IDS = {
 }
 
 
+last_class_peak_scores = []
+last_class_blob_scores = []
+
+
 def load_model():
-    last_error = None
-
-    for name in MODEL_CANDIDATES:
-        try:
-            if name.endswith(".tflite"):
-                load_to_fb = uos.stat(name)[6] > (gc.mem_free() - (64 * 1024))
-                return ml.Model(name, load_to_fb=load_to_fb)
-            return ml.Model(name)
-        except Exception as exc:
-            last_error = exc
-
-    raise Exception("Failed to load model (%s)" % last_error)
+    try:
+        load_to_fb = uos.stat(MODEL_PATH)[6] > (gc.mem_free() - (64 * 1024))
+        return ml.Model(MODEL_PATH, load_to_fb=load_to_fb)
+    except Exception as exc:
+        raise Exception('Failed to load "%s" (%s)' % (MODEL_PATH, exc))
 
 
 def load_labels(model):
@@ -68,7 +89,7 @@ def load_labels(model):
     try:
         return list(model.labels)
     except Exception:
-        return ["background", "hammer", "lighter", "scissors"]
+        return list(EXPECTED_LABELS)
 
 
 def normalize_label(label_name):
@@ -87,10 +108,38 @@ def raw_to_confidence(value, dtype_code, scale_q, zero_point):
     return (float(value) - zero_point) * scale_q
 
 
+def get_label_score(labels, score_list, target_label):
+    for idx, raw_label in enumerate(labels):
+        if normalize_label(raw_label) == target_label:
+            if idx < len(score_list):
+                return score_list[idx]
+            break
+    return 0.0
+
+
+def get_label_min_confidence(label_name):
+    return CLASS_MIN_CONFIDENCE.get(label_name, MIN_CONFIDENCE)
+
+
+def get_label_required_stable_frames(label_name):
+    return CLASS_REQUIRED_STABLE_FRAMES.get(label_name, REQUIRED_STABLE_FRAMES)
+
+
+def get_label_score_bias(label_name):
+    return CLASS_SCORE_BIAS.get(label_name, 0.0)
+
+
+def get_label_min_score_gap(label_name):
+    return CLASS_MIN_SCORE_GAP.get(label_name, MIN_SCORE_GAP)
+
+
 def make_fomo_post_process(min_confidence):
     threshold_list = [(math.ceil(min_confidence * 255), 255)]
 
     def fomo_post_process(model, inputs, outputs):
+        global last_class_peak_scores
+        global last_class_blob_scores
+
         _, oh, ow, oc = model.output_shape[0]
 
         try:
@@ -116,10 +165,13 @@ def make_fomo_post_process(min_confidence):
         y_offset = ((inputs[0].roi[3] - (oh * scale_xy)) / 2) + inputs[0].roi[1]
 
         detections_by_class = [[] for _ in range(oc)]
+        last_class_peak_scores = [0.0 for _ in range(oc)]
+        last_class_blob_scores = [0.0 for _ in range(oc)]
 
         for i in range(oc):
             out_array = outputs[0][0, :, :, i]
             heatmap = image.Image(ow, oh, sensor.GRAYSCALE)
+            class_peak_score = 0.0
 
             for y in range(oh):
                 for x in range(ow):
@@ -132,7 +184,12 @@ def make_fomo_post_process(min_confidence):
                     elif confidence > 1.0:
                         confidence = 1.0
 
+                    if confidence > class_peak_score:
+                        class_peak_score = confidence
+
                     heatmap.set_pixel(x, y, int(confidence * 255))
+
+            last_class_peak_scores[i] = class_peak_score
 
             blobs = heatmap.find_blobs(
                 threshold_list,
@@ -155,6 +212,9 @@ def make_fomo_post_process(min_confidence):
                 h = int(h * scale_xy)
                 detections_by_class[i].append((x, y, w, h, score))
 
+                if score > last_class_blob_scores[i]:
+                    last_class_blob_scores[i] = score
+
         return detections_by_class
 
     return fomo_post_process
@@ -173,11 +233,12 @@ led_b = LED(3)
 
 model = load_model()
 labels = load_labels(model)
-fomo_post_process = make_fomo_post_process(MIN_CONFIDENCE)
+fomo_post_process = make_fomo_post_process(min(CLASS_MIN_CONFIDENCE.values()))
 
 clock = time.clock()
 startup_time = time.ticks_ms()
 last_send_time = time.ticks_add(startup_time, -SEND_INTERVAL_MS)
+last_debug_print_time = time.ticks_add(startup_time, -DEBUG_SCORE_PRINT_INTERVAL_MS)
 last_sent_label = None
 candidate_label = None
 candidate_count = 0
@@ -189,12 +250,24 @@ while True:
     now = time.ticks_ms()
     best_label = None
     best_score = 0.0
+    second_best_label = None
+    second_best_score = 0.0
+    best_adjusted_score = 0.0
+    second_best_adjusted_score = 0.0
     best_box = None
     best_color = None
+    frame_best_scores = {}
+    frame_best_boxes = {}
+    frame_best_colors = {}
 
     led_r.off()
     led_g.off()
     led_b.off()
+
+    for label_name in DETECTION_LABELS:
+        frame_best_scores[label_name] = 0.0
+        frame_best_boxes[label_name] = None
+        frame_best_colors[label_name] = None
 
     for i, detection_list in enumerate(model.predict([img], callback=fomo_post_process)):
         if i == 0:
@@ -214,14 +287,52 @@ while True:
         color = COLORS[i % len(COLORS)]
 
         for x, y, w, h, score in detection_list:
-            if score < MIN_CONFIDENCE:
+            if score < get_label_min_confidence(voice_label):
                 continue
 
-            if score > best_score:
-                best_score = score
-                best_label = voice_label
-                best_box = (x, y, w, h)
-                best_color = color
+            if score > frame_best_scores[voice_label]:
+                frame_best_scores[voice_label] = score
+                frame_best_boxes[voice_label] = (x, y, w, h)
+                frame_best_colors[voice_label] = color
+
+    for label_name in DETECTION_LABELS:
+        score = frame_best_scores[label_name]
+        box = frame_best_boxes[label_name]
+
+        if box is None:
+            continue
+
+        adjusted_score = score + get_label_score_bias(label_name)
+
+        if adjusted_score > best_adjusted_score:
+            second_best_adjusted_score = best_adjusted_score
+            second_best_score = best_score
+            second_best_label = best_label
+            best_adjusted_score = adjusted_score
+            best_score = score
+            best_label = label_name
+            best_box = frame_best_boxes[label_name]
+            best_color = frame_best_colors[label_name]
+        elif adjusted_score > second_best_adjusted_score:
+            second_best_adjusted_score = adjusted_score
+            second_best_score = score
+            second_best_label = label_name
+
+    raw_best_label = best_label
+    raw_best_score = best_score
+    raw_best_adjusted_score = best_adjusted_score
+    raw_second_best_label = second_best_label
+    raw_second_best_score = second_best_score
+    raw_second_best_adjusted_score = second_best_adjusted_score
+
+    if (best_label is not None) and (
+        (raw_best_adjusted_score - raw_second_best_adjusted_score) <
+        get_label_min_score_gap(best_label)
+    ):
+        best_label = None
+        best_score = 0.0
+        best_box = None
+        best_color = None
 
     if best_label is not None:
         if best_label == candidate_label:
@@ -257,10 +368,42 @@ while True:
             candidate_label = None
             candidate_count = 0
 
+    if time.ticks_diff(now, last_debug_print_time) >= DEBUG_SCORE_PRINT_INTERVAL_MS:
+        hammer_peak = get_label_score(labels, last_class_peak_scores, "hammer")
+        lighter_peak = get_label_score(labels, last_class_peak_scores, "lighter")
+        scissors_peak = get_label_score(labels, last_class_peak_scores, "scissors")
+        hammer_blob = get_label_score(labels, last_class_blob_scores, "hammer")
+        lighter_blob = get_label_score(labels, last_class_blob_scores, "lighter")
+        scissors_blob = get_label_score(labels, last_class_blob_scores, "scissors")
+
+        print(
+            "peak h=%.3f l=%.3f s=%.3f | blob h=%.3f l=%.3f s=%.3f | top1=%s raw=%.3f adj=%.3f top2=%s raw=%.3f adj=%.3f gap=%.3f | best=%s %.3f | cand=%s %d"
+            % (
+                hammer_peak,
+                lighter_peak,
+                scissors_peak,
+                hammer_blob,
+                lighter_blob,
+                scissors_blob,
+                raw_best_label if raw_best_label is not None else "none",
+                raw_best_score,
+                raw_best_adjusted_score,
+                raw_second_best_label if raw_second_best_label is not None else "none",
+                raw_second_best_score,
+                raw_second_best_adjusted_score,
+                raw_best_adjusted_score - raw_second_best_adjusted_score,
+                best_label if best_label is not None else "none",
+                best_score,
+                candidate_label if candidate_label is not None else "none",
+                candidate_count,
+            )
+        )
+        last_debug_print_time = now
+
     if candidate_label is None:
         continue
 
-    if candidate_count < REQUIRED_STABLE_FRAMES:
+    if candidate_count < get_label_required_stable_frames(candidate_label):
         continue
 
     if time.ticks_diff(now, startup_time) < STARTUP_SUPPRESS_MS:

@@ -15,19 +15,31 @@ static void OpenMV_SetObject(uint8_t object_id)
     g_openmv_data.is_new = 1;
 }
 
+void OpenMV_ResetResult(void)
+{
+    g_openmv_data.object_id = OBJ_NONE;
+    g_openmv_data.pos_x = 0U;
+    g_openmv_data.pos_y = 0U;
+    g_openmv_data.is_valid = 0U;
+    g_openmv_data.is_new = 0U;
+}
+
 static void OpenMV_ParseTextLine(void)
 {
     s_rx_str[s_rx_str_idx] = '\0';
 
-    if (strstr(s_rx_str, "Lighter") != NULL || strstr(s_rx_str, "lighter") != NULL)
+    if ((strstr(s_rx_str, "Lighter") != NULL) || (strstr(s_rx_str, OPENMV_LABEL_LIGHTER) != NULL))
     {
         OpenMV_SetObject(OBJ_LIGHTER);
     }
-    else if (strstr(s_rx_str, "Scissors") != NULL || strstr(s_rx_str, "scissors") != NULL)
+    else if ((strstr(s_rx_str, "Scissors") != NULL) ||
+             (strstr(s_rx_str, OPENMV_LABEL_SCISSORS) != NULL) ||
+             (strstr(s_rx_str, "Scissor") != NULL) ||
+             (strstr(s_rx_str, OPENMV_LABEL_SCISSOR) != NULL))
     {
         OpenMV_SetObject(OBJ_SCISSORS);
     }
-    else if (strstr(s_rx_str, "Hammer") != NULL || strstr(s_rx_str, "hammer") != NULL)
+    else if ((strstr(s_rx_str, "Hammer") != NULL) || (strstr(s_rx_str, OPENMV_LABEL_HAMMER) != NULL))
     {
         OpenMV_SetObject(OBJ_HAMMER);
     }
@@ -96,11 +108,22 @@ void OpenMV_Init(void)
     s_rx_str_idx = 0;
     g_openmv_rx_index = 0;
     g_openmv_rx_byte_count = 0;
-    g_openmv_data.is_valid = 0;
-    g_openmv_data.is_new = 0;
+    OpenMV_ResetResult();
 }
 
-void OpenMV_SendCmd(uint8_t cmd) { (void)cmd; }
+void OpenMV_SendCmd(uint8_t cmd)
+{
+    while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
+    USART_SendData(USART1, OPENMV_TX_HEADER);
+
+    while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
+    USART_SendData(USART1, cmd);
+
+    while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
+    USART_SendData(USART1, OPENMV_TX_TAIL);
+
+    while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET);
+}
 
 void OpenMV_ParseByte(uint8_t byte)
 {

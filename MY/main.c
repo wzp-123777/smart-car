@@ -71,11 +71,11 @@ static const char *g_line_debug_mode = "INIT";
 #define LINE_FOLLOW_TARGET_LOST         0.0f
 #define LINE_FOLLOW_TARGET_SEARCH      20.0f   // 提速前为 12.0
 #define LINE_FOLLOW_FINE_ADJUST        14.0f   // 放大转弯差速
-#define LINE_FOLLOW_STRONG_ADJUST      25.0f   // 放大转弯差速
-#define LINE_FOLLOW_SEARCH_ADJUST      40.0f   // 放大转弯差速
+#define LINE_FOLLOW_STRONG_ADJUST      30.0f   // 放大转弯差速
+#define LINE_FOLLOW_SEARCH_ADJUST      70.0f   // 放大转弯差速
 #define LINE_FOLLOW_GYRO_DAMP           0.05f
 #define LINE_FOLLOW_GYRO_DAMP_MAX       4.0f
-#define LINE_FOLLOW_MIN_INNER_SPEED    -45.0f  // 允许内轮反转，增大反转幅度防抱死
+#define LINE_FOLLOW_MIN_INNER_SPEED    -80.0f  // 允许内轮反转，增大反转幅度防抱死
 #define LINE_FOLLOW_GYRO_CAL_SAMPLES   12U
 #define LINE_FOLLOW_GYRO_CAL_DELAY_MS   5U
 /* ================================================================
@@ -200,13 +200,11 @@ void LineFollow_RunByRawIR(void)
     float gyro_rate = g_mpu_data.gyro_z_dps - g_mpu_gyro_z_bias;
     float speed_left = LINE_FOLLOW_TARGET_STRAIGHT;
     float speed_right = LINE_FOLLOW_TARGET_STRAIGHT;
-    uint8_t left_edge_on = g_ir_data.sensor[0];
-    uint8_t left_near_on = g_ir_data.sensor[1];
-    uint8_t center_on = g_ir_data.sensor[2];
-    uint8_t right_near_on = g_ir_data.sensor[3];
-    uint8_t right_edge_on = g_ir_data.sensor[4];
-    uint8_t left_score = (left_edge_on ? 2U : 0U) + (left_near_on ? 1U : 0U);
-    uint8_t right_score = (right_edge_on ? 2U : 0U) + (right_near_on ? 1U : 0U);
+    uint8_t left_on = g_ir_data.sensor[0];
+    uint8_t center_on = g_ir_data.sensor[1];
+    uint8_t right_on = g_ir_data.sensor[2];
+    uint8_t left_score = left_on ? 2U : 0U;
+    uint8_t right_score = right_on ? 2U : 0U;
     int8_t turn_dir = 0;
 
     g_line_debug_left_score = left_score;
@@ -222,7 +220,7 @@ void LineFollow_RunByRawIR(void)
     {
         turn_dir = -1;
 
-        if (left_edge_on != 0U)
+        if (left_on != 0U)
         {
             base_speed = center_on ? LINE_FOLLOW_TARGET_STRONG : LINE_FOLLOW_TARGET_SEARCH;
             steer_strength = center_on ? LINE_FOLLOW_STRONG_ADJUST : LINE_FOLLOW_SEARCH_ADJUST;
@@ -239,7 +237,7 @@ void LineFollow_RunByRawIR(void)
     {
         turn_dir = 1;
 
-        if (right_edge_on != 0U)
+        if (right_on != 0U)
         {
             base_speed = center_on ? LINE_FOLLOW_TARGET_STRONG : LINE_FOLLOW_TARGET_SEARCH;
             steer_strength = center_on ? LINE_FOLLOW_STRONG_ADJUST : LINE_FOLLOW_SEARCH_ADJUST;
@@ -271,7 +269,7 @@ void LineFollow_RunByRawIR(void)
         gyro_damp = LineFollow_AbsFloat(gyro_rate) * LINE_FOLLOW_GYRO_DAMP;
         gyro_damp = LineFollow_ClampFloat(gyro_damp, 0.0f, LINE_FOLLOW_GYRO_DAMP_MAX);
 
-        if ((left_edge_on != 0U) || (right_edge_on != 0U))
+        if ((left_on != 0U) || (right_on != 0U))
         {
             steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 2.0f, LINE_FOLLOW_SEARCH_ADJUST);
         }

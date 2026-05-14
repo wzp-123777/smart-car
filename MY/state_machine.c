@@ -53,13 +53,6 @@ void SM_TransitionTo(StateMachine_TypeDef *sm, CarState_TypeDef new_state)
     case STATE_VOICE_REPORT:
         sm->timeout_ms = 4000;  /* 语音播报最多4秒 */
         break;
-    case STATE_TURN_LEFT:
-    case STATE_TURN_RIGHT:
-        sm->timeout_ms = 2000;  /* 转弯最多2秒 */
-        break;
-    case STATE_U_TURN:
-        sm->timeout_ms = 4000;  /* 掉头最多4秒 */
-        break;
     default:
         sm->timeout_ms = 0;     /* 无超时 */
         break;
@@ -106,18 +99,7 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
          * 巡线控制在定时器中断中执行（10ms周期）
          * 这里只处理状态切换事件
          */
-        if (event == EVENT_CROSS_DETECTED)
-        {
-            /* 检测到十字路口/标记线 -> 累加检查点，不停车，发送视觉请求 */
-            sm->checkpoint_count++;
-            Alert_Checkpoint(100);
-            
-            /* 异步发送识别指令给OpenMV，继续巡线 */
-            OpenMV_SendCmd(OPENMV_CMD_DETECT);
-            OpenMV_ClearNewFlag();
-            // 不阻塞，不改变状态
-        }
-        else if (event == EVENT_REACHED_END)
+        if (event == EVENT_REACHED_END)
         {
             /* 到达终点 */
             Motor_Stop();
@@ -135,28 +117,6 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
             SYN6658_ReportPoint(sm->checkpoint_count);
             // 不使用delay阻塞主循环，直接先后发送或者由硬件FIFO缓冲
             SYN6658_ReportObject(sm->detected_obj_id);
-        }
-        break;
-
-    /* ==================== 左转 ==================== */
-    case STATE_TURN_LEFT:
-        Motor_SetLeft(-300);   /* 左轮反转 */
-        Motor_SetRight(300);   /* 右轮正转 */
-
-        if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
-        {
-            SM_TransitionTo(sm, STATE_LINE_FOLLOW);
-        }
-        break;
-
-    /* ==================== 右转 ==================== */
-    case STATE_TURN_RIGHT:
-        Motor_SetLeft(300);
-        Motor_SetRight(-300);
-
-        if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
-        {
-            SM_TransitionTo(sm, STATE_LINE_FOLLOW);
         }
         break;
 
@@ -204,9 +164,6 @@ const char* SM_GetStateName(CarState_TypeDef state)
     case STATE_STOP_AND_DETECT: return "STOP_DETECT";
     case STATE_VISION_DETECT:   return "VISION";
     case STATE_VOICE_REPORT:    return "VOICE";
-    case STATE_TURN_LEFT:       return "TURN_L";
-    case STATE_TURN_RIGHT:      return "TURN_R";
-    case STATE_U_TURN:          return "U_TURN";
     case STATE_FINISHED:        return "FINISHED";
     case STATE_ERROR:           return "ERROR";
     default:                    return "UNKNOWN";

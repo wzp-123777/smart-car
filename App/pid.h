@@ -27,6 +27,8 @@ typedef struct {
 
     float integral;     // 积分累加值（位置式用，增量式可选）
     float integral_max; // 积分限幅（防饱和）
+
+    float last_derivative; // 上次微分滤波结果
 } PID_TypeDef;
 
 /* ======================== 函数声明 ======================== */

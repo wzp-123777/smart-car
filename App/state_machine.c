@@ -52,13 +52,6 @@ void SM_TransitionTo(StateMachine_TypeDef *sm, CarState_TypeDef new_state)
     case STATE_VOICE_REPORT:
         sm->timeout_ms = 4000;
         break;
-    case STATE_TURN_LEFT:
-    case STATE_TURN_RIGHT:
-        sm->timeout_ms = 2000;
-        break;
-    case STATE_U_TURN:
-        sm->timeout_ms = 4000;
-        break;
     default:
         sm->timeout_ms = 0;
         break;
@@ -95,43 +88,10 @@ void SM_Process(StateMachine_TypeDef *sm, CarEvent_TypeDef event)
         break;
 
     case STATE_LINE_FOLLOW:
-        if (event == EVENT_CROSS_DETECTED)
-        {
-            sm->checkpoint_count++;
-            Alert_Checkpoint(100);
-            /* OpenMV 常在线主动上报，这里不再发送触发命令。 */
-        }
-        else if (event == EVENT_REACHED_END)
+        if (event == EVENT_REACHED_END)
         {
             Motor_Stop();
             SM_TransitionTo(sm, STATE_FINISHED);
-        }
-        break;
-
-    case STATE_TURN_LEFT:
-        Motor_SetLeft(-300);
-        Motor_SetRight(300);
-        if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
-        {
-            SM_TransitionTo(sm, STATE_LINE_FOLLOW);
-        }
-        break;
-
-    case STATE_TURN_RIGHT:
-        Motor_SetLeft(300);
-        Motor_SetRight(-300);
-        if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
-        {
-            SM_TransitionTo(sm, STATE_LINE_FOLLOW);
-        }
-        break;
-
-    case STATE_U_TURN:
-        Motor_SetLeft(-400);
-        Motor_SetRight(400);
-        if (event == EVENT_TURN_DONE || SM_IsTimeout(sm))
-        {
-            SM_TransitionTo(sm, STATE_LINE_FOLLOW);
         }
         break;
 
@@ -164,9 +124,7 @@ const char* SM_GetStateName(CarState_TypeDef state)
     case STATE_STOP_AND_DETECT: return "STOP_DETECT";
     case STATE_VISION_DETECT:   return "VISION";
     case STATE_VOICE_REPORT:    return "VOICE";
-    case STATE_TURN_LEFT:       return "TURN_L";
-    case STATE_TURN_RIGHT:      return "TURN_R";
-    case STATE_U_TURN:          return "U_TURN";
+
     case STATE_FINISHED:        return "FINISHED";
     case STATE_ERROR:           return "ERROR";
     default:                    return "UNKNOWN";

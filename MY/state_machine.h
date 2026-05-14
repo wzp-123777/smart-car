@@ -27,9 +27,6 @@ typedef enum {
     STATE_STOP_AND_DETECT,  /* 停车检测模式（到达巡检点，停下来） */
     STATE_VISION_DETECT,    /* 视觉识别模式（OpenMV正在识别） */
     STATE_VOICE_REPORT,     /* 语音播报模式（SYN6658正在播报） */
-    STATE_TURN_LEFT,        /* 左转弯 */
-    STATE_TURN_RIGHT,       /* 右转弯 */
-    STATE_U_TURN,           /* 掉头 */
     STATE_FINISHED,         /* 任务完成 */
     STATE_ERROR,            /* 错误状态 */
 } CarState_TypeDef;
@@ -38,11 +35,9 @@ typedef enum {
 typedef enum {
     EVENT_NONE = 0,         /* 无事件 */
     EVENT_START,            /* 启动按键按下 */
-    EVENT_CROSS_DETECTED,   /* 检测到十字路口/标记线 */
     EVENT_LINE_LOST,        /* 脱线 */
     EVENT_VISION_DONE,      /* OpenMV识别完成 */
     EVENT_VOICE_DONE,       /* 语音播报完成 */
-    EVENT_TURN_DONE,        /* 转弯完成 */
     EVENT_REACHED_END,      /* 到达终点 */
     EVENT_TIMEOUT,          /* 超时 */
 } CarEvent_TypeDef;

@@ -32,17 +32,17 @@ void IR_Read(IR_DataTypeDef *ir_data)
 {
     /* 读取各路传感器（根据传感器极性决定是否取反） */
     ir_data->sensor[0] = !GPIO_ReadInputDataBit(IR1_PORT, IR1_PIN);  /* 最左 */
-    ir_data->sensor[1] = !GPIO_ReadInputDataBit(IR2_PORT, IR2_PIN);
+    ir_data->sensor[1] = !GPIO_ReadInputDataBit(IR2_PORT, IR2_PIN);  /* 偏左 */
     ir_data->sensor[2] = !GPIO_ReadInputDataBit(IR3_PORT, IR3_PIN);  /* 中间 */
-    ir_data->sensor[3] = !GPIO_ReadInputDataBit(IR4_PORT, IR4_PIN);
+    ir_data->sensor[3] = !GPIO_ReadInputDataBit(IR4_PORT, IR4_PIN);  /* 偏右 */
     ir_data->sensor[4] = !GPIO_ReadInputDataBit(IR5_PORT, IR5_PIN);  /* 最右 */
 
     /* 合成原始字节（方便调试和查表） */
-    ir_data->raw_byte = (ir_data->sensor[0] << 4)
+    ir_data->raw_byte = (uint8_t)((ir_data->sensor[0] << 4)
                       | (ir_data->sensor[1] << 3)
                       | (ir_data->sensor[2] << 2)
                       | (ir_data->sensor[3] << 1)
-                      | (ir_data->sensor[4] << 0);
+                      | (ir_data->sensor[4] << 0));
 
     /* 判断特殊状态 */
     ir_data->all_black = (ir_data->raw_byte == 0x1F) ? 1 : 0;  /* 11111 全黑 */
@@ -55,14 +55,14 @@ void IR_Read(IR_DataTypeDef *ir_data)
 /**
  * @brief  计算当前黑线相对车体中心的位置
  * @note
- *   1. 权重从左到右依次为 {-20, -10, 0, 10, 20}，比旧版更细腻。
+ *   1. 权重从左到右依次为 {-80, -40, 0, 40, 80}。
  *   2. 当 5 路传感器全部为白色时，直接返回 0，不做丢线方向记忆。
  *   3. 正常压线时直接做整数平均，依赖 C 语言默认的向零取整特性，
  *      计算简单、执行开销小。
  */
 int8_t IR_GetPosition(IR_DataTypeDef *ir_data)
 {
-    static const int8_t weights[IR_SENSOR_COUNT] = {-20, -10, 0, 10, 20};
+    static const int8_t weights[IR_SENSOR_COUNT] = {-80, -40, 0, 40, 80};
     int16_t weighted_sum = 0;
     uint8_t active_count = 0;
     int8_t current_position;

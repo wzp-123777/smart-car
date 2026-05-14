@@ -1,25 +1,25 @@
 ﻿#pragma diag_suppress 177
 /**
 * @file    main.c
-* @brief   智能巡护小车主程�?
-* @author  2026开发团�?
+* @brief   智能巡护小车主程�?
+* @author  2026开发团�?
 * @note
-*   主控: STM32F407ZGT6 (标准�?SPL)
+*   主控: STM32F407ZGT6 (标准�?SPL)
 *   视觉: OpenMV H7 Plus (UART1, 115200, PB6=TX, PB7=RX)
 *   语音: SYN6658 (UART2, 9600, PA2=TX, PA3=RX)
-*   动力: 4�?N20 + 4�?TB6612FNG (TIM1 PWM, PA8~PA11)
-*   编码�? 左前=TIM2(PA0,PA1), 右前=TIM3(PA6,PA7)
-*   循迹: 5路红�?(PD1~PD5)
-*   姿�? MPU6050 (USART3, 115200, PB10=TX, PB11=RX)
+*   动力: 4�?N20 + 4�?TB6612FNG (TIM1 PWM, PA8~PA11)
+*   编码�? 左前=TIM2(PA0,PA1), 右前=TIM3(PA6,PA7)
+*   循迹: 5路红�?(PD1~PD5)
+*   姿�? MPU6050 (USART3, 115200, PB10=TX, PB11=RX)
 *   报警: 声光模块 (Alert_Init)
-*   PID定时�? TIM6 (10ms触发)
+*   PID定时�? TIM6 (10ms触发)
 *
-* 编程规范与说�?
-*   当前工程不使�?CubeMX �?HAL 库�?
-*   1. 采用标准外设�?CMSIS �?STM32F4xx_StdPeriph_Driver�?
-*   2. 用户代码�?App 目录下�?
-*   3. 需定义 USE_STDPERIPH_DRIVER 宏�?
-*   4. 避免使用 CubeMX 重新生成代码�?
+* 编程规范与说�?
+*   当前工程不使�?CubeMX �?HAL 库�?
+*   1. 采用标准外设�?CMSIS �?STM32F4xx_StdPeriph_Driver�?
+*   2. 用户代码�?App 目录下�?
+*   3. 需定义 USE_STDPERIPH_DRIVER 宏�?
+*   4. 避免使用 CubeMX 重新生成代码�?
 */
 #include "stm32f4xx.h"
 #include "pid.h"
@@ -35,23 +35,23 @@
 /* ================================================================
 *                     全局变量定义
 * ================================================================ */
-/* PID 左右轮控�?*/
+/* PID 左右轮控�?*/
 PID_TypeDef g_pid_left;
 PID_TypeDef g_pid_right;
 /* 转向 PID 控制 */
 PID_TypeDef g_pid_turn;
-/* 传感器数�?*/
+/* 传感器数�?*/
 IR_DataTypeDef g_ir_data;
 /* MPU6050 数据 */
 MPU6050_DataTypeDef g_mpu_data;
 /* 状态机 */
 StateMachine_TypeDef g_state_machine;
-/* 编码器读�?*/
+/* 编码器读�?*/
 volatile int16_t g_encoder_left  = 0;
 volatile int16_t g_encoder_right = 0;
 /* 基础速度 / 10ms 周期 */
 int16_t g_base_speed = 15;
-/* PID 计算后的 PWM �?*/
+/* PID 计算后的 PWM �?*/
 volatile float g_motor_left_pwm  = 0;
 volatile float g_motor_right_pwm = 0;
 /* 10ms 中断标志 */
@@ -70,47 +70,37 @@ static const char *g_line_debug_mode = "INIT";
 #define LINE_FOLLOW_CROSS_SIDE_STEER   1U
 
 typedef struct {
-    float target_straight;
-    float target_fine;
-    float target_strong;
-    float target_lost;
-    float target_search;
-    float fine_adjust;
-    float strong_adjust;
-    float search_adjust;
-    float gyro_damp;
-    float gyro_damp_max;
-    float min_inner_speed;
+    float base_speed;       /* 基础直行速度 */
+    float lost_speed;       /* 全白丢线时的速度（通常为0或降速盲滑） */
+    float turn_kp;          /* 外环循迹PID比例系数 (P) */
+    float turn_kd;          /* 外环循迹PID阻尼系数 (D) */
+    float min_inner_speed;  /* 内侧最小轮速限幅，防止转弯锁死 */
 } LineFollowProfile_TypeDef;
 
 static const LineFollowProfile_TypeDef g_line_follow_default_profile = {
-    35.0f, 30.0f, 25.0f, 0.0f, 20.0f,
-    14.0f, 25.0f, 40.0f,
-    0.05f, 4.0f, -45.0f
+    35.0f, 0.0f, 1.5f, 0.2f, -80.0f
 };
 
 static const LineFollowProfile_TypeDef g_line_follow_task_profiles[5] = {
-    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f},
-    {35.0f, 30.0f, 25.0f, 0.0f, 20.0f, 14.0f, 25.0f, 40.0f, 0.05f, 4.0f, -45.0f},
-    {32.0f, 28.0f, 24.0f, 0.0f, 18.0f, 13.0f, 23.0f, 36.0f, 0.05f, 4.0f, -40.0f},
-    {26.0f, 22.0f, 18.0f, 0.0f, 15.0f, 11.0f, 18.0f, 30.0f, 0.04f, 3.5f, -32.0f},
-    {38.0f, 33.0f, 27.0f, 0.0f, 22.0f, 16.0f, 28.0f, 44.0f, 0.06f, 4.0f, -48.0f}
+    {35.0f, 0.0f, 1.7f, 0.2f, -80.0f}, /* idx 0: default/none */
+    {19.0f, 0.0f, 2.4f, 0.3f, -80.0f}, /* idx 1: task 1 */
+    {24.0f, 0.0f, 2.5f, 0.2f, -70.0f}, /* idx 2 */
+    {26.0f, 0.0f, 1.5f, 0.1f, -60.0f}, /* idx 3 */
+    {22.0f, 0.0f, 1.8f, 0.2f, -85.0f}  /* idx 4 */
 };
 
 static LineFollowProfile_TypeDef g_line_follow_active_profile = {
-    35.0f, 30.0f, 25.0f, 0.0f, 20.0f,
-    14.0f, 25.0f, 40.0f,
-    0.05f, 4.0f, -45.0f
+    35.0f, 0.0f, 1.5f, 0.2f, -80.0f
 };
 /* ================================================================
-*                     系统滴答定时器函�?SysTick 相关
+*                     系统滴答定时器函�?SysTick 相关
 * ================================================================ */
 volatile uint32_t g_sys_tick = 0;
 uint32_t HAL_GetTick(void)
 {
 return g_sys_tick;
 }
-/* SysTick_Handler �?stm32f4xx_it.c 中定�?
+/* SysTick_Handler �?stm32f4xx_it.c 中定�?
 * 并在该函数中累加 g_sys_tick 变量
 */
 // void SysTick_Handler(void)
@@ -202,12 +192,11 @@ static float LineFollow_ClampFloat(float value, float min_value, float max_value
 
 static void LineFollow_LoadProfile(const LineFollowProfile_TypeDef *profile)
 {
-    if (profile == 0)
-    {
-        return;
-    }
-
     g_line_follow_active_profile = *profile;
+    
+    // 初始化外环循迹转向PID
+    // 输出限幅不要给太大，保护内侧轮
+    PID_Init(&g_pid_turn, profile->turn_kp, 0.0f, profile->turn_kd, 200.0f, -200.0f);
 }
 
 void LineFollow_UseDefaultProfile(void)
@@ -246,123 +235,45 @@ void LineFollow_CalibrateGyroBias(void)
 void LineFollow_RunByRawIR(void)
 {
     const LineFollowProfile_TypeDef *cfg = &g_line_follow_active_profile;
-    float base_speed = cfg->target_straight;
-    float steer_strength = 0.0f;
-    float gyro_damp = 0.0f;
-    float gyro_rate = g_mpu_data.gyro_z_dps - g_mpu_gyro_z_bias;
-    float speed_left = cfg->target_straight;
-    float speed_right = cfg->target_straight;
-    uint8_t left_edge_on = g_ir_data.sensor[0];
-    uint8_t left_near_on = g_ir_data.sensor[1];
-    uint8_t center_on = g_ir_data.sensor[2];
-    uint8_t right_near_on = g_ir_data.sensor[3];
-    uint8_t right_edge_on = g_ir_data.sensor[4];
-    uint8_t left_score = (left_edge_on ? 2U : 0U) + (left_near_on ? 1U : 0U);
-    uint8_t right_score = (right_edge_on ? 2U : 0U) + (right_near_on ? 1U : 0U);
-    int8_t turn_dir = 0;
-
-    g_line_debug_left_score = left_score;
-    g_line_debug_right_score = right_score;
+    float base_speed = cfg->base_speed;
+    float turn_cmd = 0.0f;
+    float speed_left, speed_right;
 
     if (g_ir_data.all_white != 0U)
     {
-        base_speed = cfg->target_lost;
-        steer_strength = 0.0f;
-        g_line_debug_mode = "LOST_0";
-    }
-    else if (left_score > right_score)
-    {
-        turn_dir = -1;
-
-        if (left_edge_on != 0U)
-        {
-            base_speed = center_on ? cfg->target_strong : cfg->target_search;
-            steer_strength = center_on ? cfg->strong_adjust : cfg->search_adjust;
-            g_line_debug_mode = center_on ? "EDGE_L" : "HARD_L";
-        }
-        else
-        {
-            base_speed = cfg->target_fine;
-            steer_strength = cfg->fine_adjust;
-            g_line_debug_mode = "FINE_L";
-        }
-    }
-    else if (right_score > left_score)
-    {
-        turn_dir = 1;
-
-        if (right_edge_on != 0U)
-        {
-            base_speed = center_on ? cfg->target_strong : cfg->target_search;
-            steer_strength = center_on ? cfg->strong_adjust : cfg->search_adjust;
-            g_line_debug_mode = center_on ? "EDGE_R" : "HARD_R";
-        }
-        else
-        {
-            base_speed = cfg->target_fine;
-            steer_strength = cfg->fine_adjust;
-            g_line_debug_mode = "FINE_R";
-        }
+        /* 丢线保护 */
+        base_speed = cfg->lost_speed;
+        turn_cmd = 0.0f;
+        g_line_debug_mode = "LOST";
     }
     else
     {
-        if ((center_on != 0U) || (g_ir_data.all_black != 0U))
-        {
-            base_speed = cfg->target_straight;
-            g_line_debug_mode = (g_ir_data.all_black != 0U) ? "BLACK" : "CENTER";
-        }
-        else
-        {
-            base_speed = cfg->target_fine;
-            g_line_debug_mode = "BAL";
-        }
+        /* 
+         * 全局外环转向PID 
+         * 设定目标(target)=0，当前位置(actual)=加权的红外位置(position) 
+         */
+        turn_cmd = PID_Positional(&g_pid_turn, 0.0f, (float)g_ir_data.position);
+        g_line_debug_mode = "PID_ON";
     }
 
-    if (steer_strength > 0.0f)
+    /* 当前实车方向与转向误差符号相反，这里翻转左右差速方向 */
+    speed_left  = base_speed + turn_cmd;
+    speed_right = base_speed - turn_cmd;
+
+    /* 差速限幅保护：防止转弯算出的差速过大导致内侧轮反转卡死或过调 */
+    if (speed_left < cfg->min_inner_speed)
     {
-        gyro_damp = LineFollow_AbsFloat(gyro_rate) * cfg->gyro_damp;
-        gyro_damp = LineFollow_ClampFloat(gyro_damp, 0.0f, cfg->gyro_damp_max);
-
-        if ((left_edge_on != 0U) || (right_edge_on != 0U))
-        {
-            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 2.0f, cfg->search_adjust);
-        }
-        else
-        {
-            steer_strength = LineFollow_ClampFloat(steer_strength - gyro_damp, 0.8f, cfg->fine_adjust);
-        }
+        speed_left = cfg->min_inner_speed;
     }
-
-    speed_left = base_speed;
-    speed_right = base_speed;
-
-    if (turn_dir < 0)
+    if (speed_right < cfg->min_inner_speed)
     {
-#if LINE_FOLLOW_CROSS_SIDE_STEER
-        speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
-                                            cfg->min_inner_speed,
-                                            cfg->target_straight);
-#else
-        speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
-                                           cfg->min_inner_speed,
-                                           cfg->target_straight);
-#endif
-    }
-    else if (turn_dir > 0)
-    {
-#if LINE_FOLLOW_CROSS_SIDE_STEER
-        speed_left = LineFollow_ClampFloat(base_speed - steer_strength,
-                                           cfg->min_inner_speed,
-                                           cfg->target_straight);
-#else
-        speed_right = LineFollow_ClampFloat(base_speed - steer_strength,
-                                            cfg->min_inner_speed,
-                                            cfg->target_straight);
-#endif
+        speed_right = cfg->min_inner_speed;
     }
 
+    /* 将设定好的最终线速度投喂给底层双轮独立速度内环PID */
     g_pid_left.target = speed_left;
     g_pid_right.target = speed_right;
+
     g_line_debug_left_pwm = (int16_t)speed_left;
     g_line_debug_right_pwm = (int16_t)speed_right;
 }
@@ -370,7 +281,7 @@ void LineFollow_RunByRawIR(void)
 *                     ???????????? (??????)
 * ================================================================ */
 /**
-* @brief  TIM1 PWM 初始�?(频率 16.8kHz，消除电机滋滋声)
+* @brief  TIM1 PWM 初始�?(频率 16.8kHz，消除电机滋滋声)
 *         SYSCLK 168MHz / Prescaler 10 / Period 1000 = 16.8kHz
 *         PA8~PA11 (CH1~CH4)
 */
@@ -391,9 +302,9 @@ GPIO_InitStructure.GPIO_Speed = GPIO_Speed_100MHz;
 GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
 GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
 GPIO_Init(GPIOA, &GPIO_InitStructure);
-TIM_TimeBaseStructure.TIM_Prescaler = 10 - 1; // �?168-1 改为 10-1，频率提�?16.8 �?
+TIM_TimeBaseStructure.TIM_Prescaler = 10 - 1; // �?168-1 改为 10-1，频率提�?16.8 �?
 TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-TIM_TimeBaseStructure.TIM_Period = 1000 - 1;  // 维持 1000 分辨率不�?
+TIM_TimeBaseStructure.TIM_Period = 1000 - 1;  // 维持 1000 分辨率不�?
 TIM_TimeBaseStructure.TIM_ClockDivision = 0;
 TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
 TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStructure);
@@ -592,7 +503,7 @@ if(USART_GetFlagStatus(USART1, USART_FLAG_ORE) != RESET)
 USART_ReceiveData(USART1); /* 读数据寄存器清除ORE */
 }}
 /**
-* @brief  TIM6 中断服务函数�?0ms执行一次PID计算和姿态更�?
+* @brief  TIM6 中断服务函数�?0ms执行一次PID计算和姿态更�?
 */
 void TIM6_DAC_IRQHandler(void)
 {
@@ -603,18 +514,18 @@ void TIM6_DAC_IRQHandler(void)
     {
         TIM_ClearITPendingBit(TIM6, TIM_IT_Update);
 
-        /* ===== 1. 获取部分传感器和编码器反馈�?===== */
+        /* ===== 1. 获取部分传感器和编码器反馈�?===== */
         IR_Read(&g_ir_data);
         g_encoder_left  = Encoder_Read_TIM2();
         g_encoder_right = Encoder_Read_TIM3();
 
-        /* ===== 2. MPU6050 姿态结�?===== */
-        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt�?.01s
+        /* ===== 2. MPU6050 姿态结�?===== */
+        MPU6050_UpdateYaw(&g_mpu_data, 0.01f); // 配合10ms周期修改dt�?.01s
 
-        /* ===== 3. 更新声光定时�?(非阻�? ===== */
+        /* ===== 3. 更新声光定时�?(非阻�? ===== */
         Alert_Tick10ms();
 
-        /* ===== 4. 强制保护10ms控制周期的循迹更�?===== */
+        /* ===== 4. 强制保护10ms控制周期的循迹更�?===== */
         if (g_state_machine.current_state == STATE_LINE_FOLLOW)
         {
             LineFollow_RunByRawIR();
@@ -645,7 +556,7 @@ void TIM6_DAC_IRQHandler(void)
         Motor_SetLeft((int16_t)pwm_left);
         Motor_SetRight((int16_t)pwm_right);
 
-        /* 发送事件标志给主循�?*/
+        /* 发送事件标志给主循�?*/
         g_flag_10ms = 1;
     }
 }
@@ -703,7 +614,7 @@ return 0;
 /* ==================== 语音播报 GBK 编码 ==================== */
 #define TTS_PLEASE_SELECT     "\xC7\xEB\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "请选择任务"
 #define TTS_NO_TASK_SELECTED  "\xCE\xB4\xD1\xA1\xD4\xF1\xC8\xCE\xCE\xF1" // "未选择任务"
-#define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执�?
+#define TTS_START_EXEC        "\xBF\xAA\xCA\xBC\xD4\xCB\xD0\xD0"         // "开始执�?
 
 // "任务1" ... "任务4"的GBK
 char* TASK_NAMES[5] = {
@@ -723,7 +634,7 @@ char* ENTER_TASK_NAMES[5] = {
     "\xBD\xF8\xC8\xEB\xC8\xCE\xCE\xF1\x34"
 };
 
-/* ==================== 系统调度状�?==================== */
+/* ==================== 系统调度状�?==================== */
 typedef enum {
     SYS_STATE_TASK_SELECT = 0,
     SYS_STATE_TASK_RUNNING
@@ -833,28 +744,28 @@ delay_ms(1000);
 /* ?????????NVIC????????????? */
 NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 /* ????????????? */
-MX_TIM1_PWM_Init();           // 定时�? PWM (PA8~PA11)
+MX_TIM1_PWM_Init();           // 定时�? PWM (PA8~PA11)
 Motor_GPIO_Init();            // 电机引脚/接口
 
     /* 闭环必须：使能编码器与定时器 */
     MX_TIM2_Encoder_Init();
     MX_TIM3_Encoder_Init();
-    MX_TIM6_Init();               // 核心计算定时�?(10ms)
+    MX_TIM6_Init();               // 核心计算定时�?(10ms)
     
-    /* 速度环PID参数初始�?(Kp, Ki, Kd, OutMax, OutMin) */
-    /* N20电机经验值：Kp=15.0, Ki=1.5, Kd=0.5; 增大PWM输出上限以增加转弯扭�?*/
-    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
-    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.5f, 950.0f, -950.0f);
+    /* 速度环PID参数初始�?(Kp, Ki, Kd, OutMax, OutMin) */
+    /* 内环D设为0，减少抖动；增大PWM输出上限以增加转弯扭?*/
+    PID_Init(&g_pid_left, 15.0f, 1.5f, 0.0f, 950.0f, -950.0f);
+    PID_Init(&g_pid_right, 15.0f, 1.5f, 0.0f, 950.0f, -950.0f);
     LineFollow_UseDefaultProfile();
 
     MX_USART1_Init();             // UART1 ??? (OpenMV), ????? OpenMV_Init() ???
 MX_USART2_Init();             // ?????????? (PA2/PA3, 9600)
 SYN6658_Init();               // ???????????
-OpenMV_Init();                // OpenMV 初始�?
-IR_Init();                    // 5路红外模�?
+OpenMV_Init();                // OpenMV 初始�?
+IR_Init();                    // 5路红外模�?
 MX_USART3_Init();             // MPU6050模块串口
 MPU6050_Init();               // 串口MPU数据接口
-Alert_Init();                 // 声光报警初始�?
+Alert_Init();                 // 声光报警初始�?
 StartButton_Init();           // 初始化PA15作为启动按键
 
 /* ====== 上电完成提示 ====== */

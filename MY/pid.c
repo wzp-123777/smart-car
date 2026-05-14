@@ -46,6 +46,8 @@ void PID_Init(PID_TypeDef *pid, float kp, float ki, float kd,
 
     pid->integral     = 0;
     pid->integral_max = out_max * 0.6f;  // 积分限幅为输出的60%
+
+    pid->last_derivative = 0;
 }
 
 /**
@@ -63,10 +65,15 @@ float PID_Incremental(PID_TypeDef *pid, float target, float actual)
     /* 计算当前误差 */
     pid->err = target - actual;
 
+    /* D部分低通滤波 (一阶低通滤波) */
+    float D_raw_inc = (pid->err - 2.0f * pid->err_last + pid->err_prev);
+    // 滤波系数 alpha 取 0.3 (0~1之间, 越小滤波越强)
+    pid->last_derivative = 0.3f * D_raw_inc + 0.7f * pid->last_derivative;
+
     /* 增量式PID核心公式 */
     delta = pid->Kp * (pid->err - pid->err_last)
           + pid->Ki * pid->err
-          + pid->Kd * (pid->err - 2.0f * pid->err_last + pid->err_prev);
+          + pid->Kd * pid->last_derivative;
 
     /* 累加到输出 */
     pid->output += delta;
@@ -100,10 +107,14 @@ float PID_Positional(PID_TypeDef *pid, float target, float actual)
     if (pid->integral >  pid->integral_max) pid->integral =  pid->integral_max;
     if (pid->integral < -pid->integral_max) pid->integral = -pid->integral_max;
 
+    /* D部分低通滤波 */
+    float D_raw_pos = (pid->err - pid->err_last);
+    pid->last_derivative = 0.3f * D_raw_pos + 0.7f * pid->last_derivative;
+
     /* 位置式PID */
     pid->output = pid->Kp * pid->err
                 + pid->Ki * pid->integral
-                + pid->Kd * (pid->err - pid->err_last);
+                + pid->Kd * pid->last_derivative;
 
     /* 输出限幅 */
     if (pid->output > pid->output_max)
@@ -127,4 +138,5 @@ void PID_Reset(PID_TypeDef *pid)
     pid->err_prev = 0;
     pid->output   = 0;
     pid->integral = 0;
+    pid->last_derivative = 0;
 }
